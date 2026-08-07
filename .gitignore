@@ -24,3 +24,11 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# --- Claude Code ---
+# .claude/agents/ SENGAJA dilacak: definisi coordinator dan worker memuat
+# aturan yang menjaga proses (mis. auditor read-only, syarat `done` di
+# project-lead.md). Perubahannya harus terlihat di diff.
+# Dua berikut tidak dilacak — per-mesin, dan bukan buatan project ini.
+.claude/settings.local.json
+.claude/skills/
