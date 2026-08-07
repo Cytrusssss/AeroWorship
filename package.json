@@ -1,0 +1,16 @@
+{
+  "name": "aeroworship",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Offline-first church presentation software for Windows.",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.9.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0"
+  }
+}
