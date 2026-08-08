@@ -519,3 +519,124 @@ Ia harus disertai dua langkah:
 
 Langkah ini menjadi bagian dari checklist rilis, dan `project-lead`
 memasukkannya ke brief auditor pada setiap item yang menambah command Tauri.
+
+---
+
+### ADR-0015 — `style-src 'self'`; `devCsp` sengaja TIDAK disetel
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-08 |
+| Status | Diterima |
+| Terkait | SETUP-02, NFR-14, NFR-28, FR-401…FR-406 |
+
+**Keputusan.** CSP produksi menurunkan `style-src` dari `'self' 'unsafe-inline'`
+menjadi `'self'`. `app.security.devCsp` **tidak** disetel, dan tidak boleh
+disetel di kemudian hari dengan harapan ia menegakkan CSP di mode dev.
+
+**Alasan.** Diverifikasi implementer lalu dikonfirmasi ulang auditor dari
+sumber, tiga premis:
+
+1. Build produksi tidak membutuhkan `'unsafe-inline'`. Vite mengekstrak seluruh
+   CSS SFC ke berkas yang dirujuk `<link rel="stylesheet">`; `dist/index.html`
+   dan `dist/output.html` tidak memuat blok `<style>` maupun atribut `style=""`.
+2. CSP tidak ditegakkan sama sekali saat `tauri dev`. Header hanya dipasang di
+   `tauri-2.11.5/src/protocol/tauri.rs:182` untuk aset yang dilayani lewat
+   `tauri://localhost`; dengan `build.devUrl` terisi, `get_app_url()`
+   (`manager/mod.rs:353`) mengembalikan URL Vite dan dokumen tidak pernah
+   melewati handler itu. `set_csp` (`manager/mod.rs:53`) juga tidak menyisipkan
+   `<meta http-equiv>` apa pun — tidak ada jalur kedua.
+3. **`devCsp` tidak memperbaiki (2).** Nilainya dikonsumsi di dalam
+   `get_asset()` — jalur yang persis dilewati ketika `devUrl` terisi.
+   Menyetelnya menghasilkan nol perubahan perilaku. Deskripsi skema resminya
+   ("will be injected on all HTML files on development") menyesatkan untuk
+   konfigurasi berbasis `devUrl`.
+
+**Alternatif yang ditolak.**
+- Mempertahankan `'unsafe-inline'` demi HMR — HMR tidak pernah tunduk pada CSP
+  ini sejak awal, jadi alasannya tidak pernah ada.
+- Menyetel `devCsp` — biayanya bukan nol melainkan negatif: ia menciptakan
+  kepercayaan yang salah tempat pada review berikutnya.
+
+**Konsekuensi yang diterima.**
+
+Pelanggaran `style-src` baru **hanya terlihat di build produksi**, yaitu paling
+lambat. `server.headers` di `vite.config.ts` dapat menangkap regresi
+`script-src`/`img-src`/`font-src`/`frame-src`/`object-src` lebih awal, tetapi
+**tidak** `style-src` — klien Vite menyuntik `<style>` untuk hot-update CSS.
+Karena itu penjaga `style-src` adalah **assertion build-time atas `dist/*.html`**
+(tolak bila ditemukan `<style`, `style="`, atau `<script>` ber-isi), yang
+menjadi persyaratan SETUP-03. Tidak ada penyelamat otomatis: `csp_hashes.styles`
+dideklarasikan dan dikonsumsi runtime Tauri tetapi **tidak pernah diisi** —
+`tauri-codegen-2.6.3/src/embedded_assets.rs:171` hanya menghitung hash untuk
+`.js`/`.mjs`.
+
+Renderer FR-4xx terikat oleh keputusan ini. **Boleh** dipakai, karena tidak
+diatur `style-src`: binding `:style` Vue (menulis lewat CSSOM),
+`style.setProperty()`, `insertRule()`, `CSSStyleSheet` konstruktabel +
+`adoptedStyleSheets`, dan atribut presentasi SVG (`fill`, `stroke`).
+**Akan diblokir:** `setAttribute('style', …)` langsung, `<style>` yang dibuat
+runtime, `<style>` di dalam markup SVG inline, CSS-in-JS runtime, dan `v-html`
+berisi atribut style. Geometri ternormalisasi→piksel FR-406 aman.
+
+Dua batasan yang akan tampil sebagai "bug renderer" bila tidak dicatat sekarang:
+`font-src 'self'` akan menolak font kustom pengguna dari disk, dan
+`img-src 'self' data:` akan menolak gambar background FR-402 dari disk. Keduanya
+menuntut `assetProtocol` beserta sumber `http://asset.localhost`, yaitu
+perubahan CSP tersendiri yang wajib melewati auditor.
+
+---
+
+### ADR-0016 — Guard `custom-protocol`; koreksi baseline GATE-G5
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-08 |
+| Status | Diterima |
+| Terkait | SETUP-02 (temuan auditor W1), ADR-0012, NFR-13, NFR-14, GATE-G5, GATE-G6 |
+
+**Keputusan.** Crate shell menolak kompilasi pada kombinasi
+`not(debug_assertions)` + `not(feature = "custom-protocol")`. Angka GATE-G5
+hanya sah bila diukur dari artefak keluaran `npm run tauri build`.
+
+**Alasan.** `custom-protocol` bukan feature default `tauri`, dan hanya
+ditambahkan oleh `@tauri-apps/cli`. `tauri-2.11.5/build.rs:256` menetapkan
+`let dev = !has_feature("custom-protocol")`, sehingga `cargo build --release`
+polos menghasilkan biner dengan `cfg(dev)` aktif. Biner itu tidak meng-embed
+aset dan menavigasi webview ke `http://localhost:1420`
+(`manager/webview.rs:443`) — memuat dokumen dari soket lokal yang dapat
+diduduki proses mana pun, ke dalam origin yang membawa bridge IPC dan grant
+kapabilitas aplikasi, **tanpa header CSP sama sekali** (alasan yang sama seperti
+ADR-0015 premis 2).
+
+Yang membuatnya berbahaya bukan tingkat keparahannya melainkan cara ia lolos:
+di mesin developer Vite biasanya sudah berjalan, sehingga biner ber-flavour dev
+**berfungsi sempurna**, dan cacatnya hanya muncul di mesin pengguna. Repo ini
+memang sudah rutin membangun biner release lewat Cargo polos untuk pengukuran
+A/B GATE-G5, jadi ini praktik yang sedang berjalan, bukan risiko hipotetis.
+
+**Koreksi terhadap ADR-0012.** Baseline **5.078.016 byte** yang tercatat di sana
+adalah biner ber-flavour dev — ia tidak meng-embed `dist/` dan karenanya bukan
+pembanding yang setara. Angka yang benar, dari `npm run tauri build`:
+
+| Artefak | Byte |
+| --- | --- |
+| `aeroworship.exe` (rilis sungguhan) | 5.132.800 |
+| Installer NSIS | 1.394.695 |
+
+Angka installer diukur `project-lead`; implementer melaporkan 1.393.858 pada
+artefak yang sama. Selisih 837 byte diduga nondeterminisme NSIS dan tidak
+mengubah kesimpulan: **9,3% dari anggaran NFR-16 (< 15 MB)**. Sesuai definisi
+NFR-16, angka ini tidak memuat bootstrapper WebView2 — lihat ADR-0011.
+
+**Alternatif yang ditolak.**
+- Menambahkan `custom-protocol` ke daftar feature tetap di `Cargo.toml` —
+  akan mematikan alur `tauri dev` yang justru membutuhkan flavour dev.
+- Hanya mendokumentasikan "jangan pakai `cargo build --release`" — konvensi
+  tanpa penegakan, pada cacat yang gejalanya tidak terlihat di mesin developer.
+
+**Konsekuensi yang diterima.** `cargo build --release` akan gagal dengan pesan
+eksplisit. Itu yang diinginkan, tetapi berarti siapa pun yang terbiasa dengan
+perintah itu akan menemuinya sebagai kejutan — pesannya harus menyebut
+`npm run tauri build` sebagai gantinya. `cargo check`, `cargo clippy`, dan
+`cargo test` tidak terpengaruh karena berjalan di profil dev.

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>AeroWorship Output</title>
+    <!--
+      Projector Output entry (PRD §6.3). This bundle is minimal by contract, not
+      by accident: the 28 MB line in the PRD §5.1 memory budget only holds if it
+      carries the renderer and nothing else.
+
+      Binding rules for everything reachable from this file:
+        - never import from `src/main/` (no views, no stores, no editor code);
+        - no router, no store, no network access;
+        - shared code comes from `src/shared/` only.
+
+      There is no viewport meta tag here: the output webview is sized by the
+      Rust Display Service to a physical monitor, not by a responsive layout.
+    -->
+  </head>
+  <body>
+    <div id="output"></div>
+    <script type="module" src="/output/output.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,4 @@
+# THE single template renderer (PRD §6.13), used by both the Control Panel
+# preview and the Projector Output. Because the output bundle imports it, every
+# module placed here counts against the 28 MB budget in PRD §5.1. Arrives with
+# the FR-4xx items.
