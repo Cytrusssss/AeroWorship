@@ -640,3 +640,181 @@ eksplisit. Itu yang diinginkan, tetapi berarti siapa pun yang terbiasa dengan
 perintah itu akan menemuinya sebagai kejutan — pesannya harus menyebut
 `npm run tauri build` sebagai gantinya. `cargo check`, `cargo clippy`, dan
 `cargo test` tidak terpengaruh karena berjalan di profil dev.
+
+---
+
+### ADR-0017 — Koreksi mekanisme guard ADR-0016
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-08 |
+| Status | Diterima |
+| Terkait | ADR-0016, SETUP-02 siklus 2 |
+
+**Keputusan.** Guard ADR-0016 tetap berlaku, tetapi **mekanismenya berbeda dari
+ejaan literal yang tertulis di sana**. Ejaan itu keliru dan akan menghasilkan
+kebalikan dari yang dimaksud.
+
+**Apa yang salah.** ADR-0016 menulis kondisi `not(feature = "custom-protocol")`
+seolah-olah feature itu hidup di crate `aeroworship`. Ia tidak. Tauri CLI
+mengaktifkannya sebagai **`tauri/custom-protocol`** — feature milik crate
+`tauri`. Diverifikasi implementer dari fingerprint build rilis yang berhasil:
+`target/release/.fingerprint/aeroworship-*/bin-aeroworship.json` mencatat
+`features []`, sementara `tauri-*/lib-tauri.json` memuat `custom-protocol`.
+
+Konsekuensinya: `cfg(feature = "custom-protocol")` di crate kita **selalu**
+false, sehingga guard dengan ejaan literal ADR-0016 akan menolak kompilasi
+**juga** pada `npm run tauri build` — mematikan satu-satunya jalur build yang
+benar.
+
+**Mekanisme yang dipakai.** `tauri::is_dev()`, sebuah `pub const fn` di
+`tauri-2.11.5/src/lib.rs:308` yang isinya persis `!cfg!(feature =
+"custom-protocol")` tetapi dievaluasi **di dalam crate `tauri`**, tempat feature
+itu benar-benar hidup. Kondisinya identik dengan maksud ADR-0016; sumber
+evaluasinya yang berbeda. Bentuknya `const _: () = assert!(!tauri::is_dev(), …)`
+di bawah `#[cfg(not(debug_assertions))]`, sehingga tidak perlu menambah blok
+`[features]` ke `Cargo.toml`.
+
+**Alternatif yang ditolak.**
+- Mendeklarasikan `custom-protocol = ["tauri/custom-protocol"]` di `Cargo.toml`
+  lalu berharap CLI memilih feature milik kita — bergantung pada heuristik CLI
+  yang tidak terdokumentasi.
+- `build.rs` membaca `DEP_TAURI_DEV` (tersedia: `tauri` punya `links = "Tauri"`
+  dan mencetak `cargo:dev={dev}`) lalu memanggil `compile_error!`. Ini
+  menghasilkan pesan yang lebih rapi — `error: <pesan>` alih-alih `E0080
+  evaluation panicked` — dengan biaya satu cfg kustom dan plumbing build script.
+  Ditolak karena keuntungannya kosmetik: pesan lengkapnya tetap tercetak utuh
+  di baris pertama error. Jalur ini sudah terverifikasi tersedia bila suatu saat
+  bentuk `compile_error!` dianggap sepadan.
+
+**Konsekuensi yang diterima.** Guard bersandar pada `tauri::is_dev()`, yang
+merupakan API publik tetapi bukan kontrak stabilitas yang dijanjikan lintas
+mayor. Setiap bump mayor `tauri` harus memverifikasi fungsi itu masih ada dan
+masih bermakna sama — masuk ke checklist upgrade yang sudah dibuka ADR-0013.
+
+**Koreksi angka.** Installer NSIS terukur tiga kali pada isi yang sama dan
+menghasilkan tiga angka: 1.393.858 · 1.394.695 · 1.394.292. Selisihnya di bawah
+900 byte dan mengonfirmasi nondeterminisme NSIS. `aeroworship.exe` cocok
+**byte-for-byte** di dua pengukuran independen: 5.132.800. Untuk GATE-G5,
+gunakan angka installer sebagai kisaran ~1,39 MB, bukan sebagai nilai tunggal.
+
+---
+
+### ADR-0018 — Guard pindah ke `cfg(dev)`; dua koreksi dari audit SETUP-02
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-08 |
+| Status | Diterima |
+| Terkait | ADR-0016, ADR-0017, SETUP-03, NFR-14 |
+
+**Keputusan.** Mekanisme guard berpindah dari `tauri::is_dev()` ke
+`#[cfg(all(not(debug_assertions), dev))]` + `compile_error!`. Perpindahannya
+dikerjakan bersama SETUP-03, bukan sebagai siklus tersendiri — guard yang
+sekarang bekerja dan terverifikasi di kedua arah.
+
+**Koreksi pertama — penilaian biaya di ADR-0017 keliru.** ADR-0017 menolak
+alternatif `cfg(dev)` dengan alasan "biaya satu cfg kustom dan plumbing build
+script". Biaya itu **tidak ada**. `tauri_build::build()` — yang sudah dipanggil
+di `src-tauri/build.rs:2` — memanggil `cfg_alias("dev", is_dev())` di
+`tauri-build-2.6.3/src/lib.rs:519`, yang mencetak `cargo:rustc-check-cfg=cfg(dev)`
+dan, bila dev, `cargo:rustc-cfg=dev`. Tidak ada build script tambahan dan tidak
+ada `DEP_TAURI_DEV` yang perlu dibaca sendiri.
+
+Lebih jauh, bentuk itu adalah **rekomendasi resmi Tauri**. Changelog CLI
+(`node_modules/@tauri-apps/cli/CHANGELOG.md:1184`) berbunyi: *"To check if
+running on production, use `#[cfg(not(dev))]` instead of `#[cfg(feature =
+"custom-protocol")]`"*, dan menyatakan feature `custom-protocol` "is no longer
+required on your application and is now ignored" untuk crate aplikasi.
+
+Konsekuensinya, risiko upgrade yang saya catat di ADR-0017 — ketergantungan
+pada `tauri::is_dev()` yang bukan kontrak stabilitas lintas mayor — **tidak
+perlu ditanggung sama sekali.** Perpindahan ke `cfg(dev)` menghapusnya, dan
+sekaligus mengubah pesan kegagalan dari `E0080 evaluation panicked` menjadi
+`error: <pesan>` yang wajar.
+
+**Koreksi kedua — nilai penghapusan `@tauri-apps/api` salah kalau dibaca
+sebagai pengetatan IPC.** `tauri-2.11.5/src/manager/webview.rs:172-185`
+menyuntikkan `window.__TAURI_INTERNALS__` **tanpa syarat**, terlepas dari
+`withGlobalTauri: false`. Frontend tetap dapat memanggil `core:event:default`
+lewat internals itu tanpa paket npm apa pun. Yang benar-benar berkurang dari
+penghapusan tersebut adalah permukaan supply-chain dan ukuran bundle — bukan
+batas keamanan.
+
+Ini perlu tercatat karena `withGlobalTauri: false` mudah dibaca sebagai
+pertahanan yang lebih kuat daripada kenyataannya. Satu-satunya batas yang nyata
+adalah manifest kapabilitas, dan itu berarti setiap permission yang ditambahkan
+sejak sekarang harus diasumsikan dapat dipanggil oleh kode frontend mana pun
+yang berhasil dieksekusi di webview — termasuk kode yang masuk lewat XSS dari
+lirik atau template.
+
+**Alternatif yang ditolak.**
+- Menjalankan siklus tersendiri untuk SETUP-02 hanya demi perpindahan ini —
+  guard yang ada sudah menutup W1 dan terverifikasi; auditor menyatakan
+  eksplisit ia tidak menahan penutupan.
+- Membiarkan ADR-0017 berdiri tanpa koreksi — reviewer berikutnya akan
+  mempercayai penilaian biaya yang keliru dan menanggung risiko upgrade yang
+  tidak perlu.
+
+**Konsekuensi yang diterima.** Sampai SETUP-03 mendarat, guard tetap bersandar
+pada `tauri::is_dev()` dan risiko upgrade di ADR-0017 masih berlaku dalam
+jendela itu. Ditambah temuan S9 auditor: kondisi guard memakai `debug_assertions`
+sebagai proksi profil rilis, dan proksi itu dapat dimatikan senyap dengan
+menyetel `debug-assertions = true` di `[profile.release]` atau lewat `RUSTFLAGS`.
+Penanda silang di `[profile.release]` ikut dikerjakan bersama perpindahan ini.
+
+---
+
+### ADR-0019 — Guard menolak `cargo test --release`; harness perf SETUP-05 terdampak
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-08 |
+| Status | Diterima |
+| Terkait | ADR-0016, ADR-0017, ADR-0018, SETUP-05, GATE-G1…G9 |
+
+**Keputusan.** Guard `custom-protocol` menolak **seluruh** profil rilis, bukan
+hanya build biner. Konsekuensinya diterima, dan `tests/perf/` di SETUP-05 wajib
+dirancang mengelilinginya.
+
+**Temuan.** Kondisi guard adalah `#[cfg(not(debug_assertions))]`, yang lebih
+luas daripada "biner rilis". Diverifikasi tester:
+
+```
+cargo test --release --workspace --no-run  →  EXIT 101
+  error: could not compile `aeroworship` (lib test)
+```
+
+`cargo test --release` dan `cargo bench` ikut tertolak, dan pesan errornya
+menyarankan `npm run tauri build` — saran yang salah untuk sebuah test run.
+
+**Mengapa ADR-0018 tidak menyelesaikannya.** Perpindahan ke
+`cfg(all(not(debug_assertions), dev))` **tidak** memperbaiki arah ini:
+`cargo test --release` juga tidak membawa `custom-protocol`, sehingga `dev`
+tetap aktif dan guard tetap menyala. Kedua bentuk berperilaku sama di sini.
+
+**Mengapa ini penting sekarang.** PRD §6.13 menempatkan harness NFR-01…NFR-07
+di `tests/perf/`, dan pengukuran performa secara alami dijalankan di profil
+rilis — itu justru gunanya. GATE-G1 sampai G9 bersandar padanya.
+
+**Jalan keluar, keduanya terverifikasi tester.**
+
+| Kebutuhan | Perintah |
+| --- | --- |
+| Harness yang menyentuh crate shell | `cargo test --release -p aeroworship --features tauri/custom-protocol --no-run` → exit 0 |
+| Harness yang hanya menyentuh crate domain | `cargo build --release -p aeroworship-core` → exit 0, tidak terpengaruh sama sekali |
+
+Baris kedua adalah keuntungan tak terduga dari ADR-0008: karena logika domain
+hidup di crate yang tidak menyentuh `tauri`, sebagian besar harness performa
+tidak akan pernah bersinggungan dengan guard ini.
+
+**Alternatif yang ditolak.**
+- Mempersempit guard agar mengizinkan target test — akan membuka kembali jalur
+  yang persis dijaga ADR-0016, karena biner test rilis juga memuat `main`.
+- Melepas guard dan mengandalkan dokumentasi — sudah ditolak di ADR-0016.
+
+**Konsekuensi yang diterima.** SETUP-05 harus menetapkan perintah test rilis
+yang benar di satu tempat (skrip npm atau alias cargo), bukan membiarkan tiap
+orang menemukannya sendiri lewat pesan error yang menyesatkan. Pesan guard
+sebaiknya ikut menyebut jalur `--features tauri/custom-protocol` untuk kasus
+test — saat ini ia hanya menyebut `npm run tauri build`.

@@ -23,6 +23,17 @@ export default defineConfig({
       // every `cargo` write.
       ignored: ['**/src-tauri/**'],
     },
+    fs: {
+      // Vite derives the default `allow` from the workspace root, which with
+      // `root: 'src'` is the whole repository — `/@fs/<repo>/src-tauri/...`
+      // would then serve Rust sources, `Cargo.lock` and `capabilities/*.json`
+      // for as long as `npm run dev` runs. The dev server binds to loopback, so
+      // that is local-only exposure and this is hardening rather than a fix,
+      // but nothing outside these two directories is ever a legitimate request.
+      // Entries are resolved against `root`; Vite appends its own client
+      // directory automatically, and it already sits under `node_modules/`.
+      allow: ['.', '../node_modules'],
+    },
   },
   build: {
     outDir: '../dist',
