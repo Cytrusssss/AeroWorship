@@ -1,7 +1,8 @@
 {
-  // Deliberately minimal: only what Vite needs to transpile `.ts` and the
-  // `<script lang="ts">` blocks of `.vue`. Strictness flags, project references
-  // and the `vue-tsc` type-check pass are SETUP-03, not this item.
+  // Two jobs: describe what Vite has to transpile, and define what
+  // `npm run typecheck` (`vue-tsc --noEmit`) checks. Vite never reads the
+  // strictness flags — esbuild strips types without checking them — so this
+  // file is the only thing standing between the frontend and untyped code.
   "compilerOptions": {
     // WebView2 on Windows 10 1809+ is evergreen Chromium (NFR-17), so a modern
     // target is safe; Vite's own `build.target` is what actually gates output.
@@ -14,7 +15,30 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
     // Vite emits; tsc is only ever used for checking.
-    "noEmit": true
+    "noEmit": true,
+
+    // The build tooling under `scripts/` is plain ESM JavaScript — it has to
+    // run under bare `node` from the `postbuild`/`preinstall` hooks, and Node
+    // 22.16 does not strip types without a flag. `checkJs` plus JSDoc gets it
+    // type-checked anyway, so the guard that protects the CSP is not the one
+    // unchecked file in the repository.
+    "allowJs": true,
+    "checkJs": true,
+    "types": ["node"],
+
+    // Strictness. `strict` is the whole family; the three below are the ones
+    // it does not include and that catch real mistakes rather than style.
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.vue", "vite.config.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "src/**/*.vue",
+    "scripts/**/*.js",
+    "vite.config.ts",
+    "vitest.config.ts"
+  ]
 }

@@ -818,3 +818,73 @@ yang benar di satu tempat (skrip npm atau alias cargo), bukan membiarkan tiap
 orang menemukannya sendiri lewat pesan error yang menyesatkan. Pesan guard
 sebaiknya ikut menyebut jalur `--features tauri/custom-protocol` untuk kasus
 test — saat ini ia hanya menyebut `npm run tauri build`.
+
+---
+
+### ADR-0020 — Perintah gate Rust wajib `--all` / `--workspace`
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-08 |
+| Status | Diterima |
+| Terkait | SETUP-03, ADR-0008, SETUP-05, NFR-32, GATE-G10 |
+
+**Keputusan.** Dua dari enam perintah verifikasi standar berubah bentuk secara
+permanen:
+
+| Lapisan | Sebelum | **Sesudah** |
+| --- | --- | --- |
+| Rust format | `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | `cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check` |
+| Rust test | `cargo test --manifest-path src-tauri/Cargo.toml` | `cargo test --workspace --manifest-path src-tauri/Cargo.toml` |
+
+`cargo clippy` tidak berubah. Bentuk lama tidak boleh dikutip lagi di brief,
+di README, maupun di definisi agent.
+
+**Alasan.** `--manifest-path` menamai **paket** `aeroworship`, bukan workspace,
+sehingga `cargo fmt` dan `cargo test` memilih paket itu saja dan melewati
+`aeroworship-core` sepenuhnya. Diverifikasi `project-lead` secara non-destruktif
+lewat `cargo fmt -v`, yang mencetak daftar berkas yang benar-benar diserahkan ke
+rustfmt:
+
+```
+tanpa --all : build.rs · src/lib.rs · src/main.rs
+dengan --all: build.rs · crates/core/src/lib.rs · src/lib.rs · src/main.rs
+```
+
+Implementer mengonfirmasi arah yang sama secara destruktif: dengan kode
+rusak-format dan sebuah `#[test]` yang pasti gagal disuntikkan ke
+`crates/core/src/lib.rs`, kedua bentuk lama tetap **exit 0** — lolos palsu.
+
+Ini bukan ketidaknyamanan, ini pembatalan diam-diam atas ADR-0008. Seluruh
+logika correctness-critical PRD §6.1 — parser referensi kitab, slide splitting,
+serialisasi `.aero`, resolusi path — hidup di `aeroworship-core`. NFR-32 dan
+GATE-G10 menuntut coverage ≥ 80% **di crate itu**. Bentuk lama berarti perintah
+gate akan melaporkan hijau sementara nol test core pernah dijalankan, dan
+kegagalan itu tidak menghasilkan gejala apa pun sampai seseorang kebetulan
+menjalankan cargo dari dalam `src-tauri/`. Biayanya nol hari ini karena core
+belum punya test; ia menjadi tak terbatas pada item pertama yang menambahkannya.
+
+`cargo clippy` selamat karena mekanismenya berbeda: ia melewatkan seluruh
+workspace member lewat `RUSTC_WORKSPACE_WRAPPER`, dan `-D warnings` sampai ke
+sana — terbukti, warning yang disuntikkan ke core menghasilkan
+`error: could not compile aeroworship-core`. Kesamaan bentuk ketiga perintah itu
+justru yang membuat cacatnya sulit terlihat.
+
+**Alternatif yang ditolak.**
+- Alias cargo di `.cargo/config.toml` (`fmt = "fmt --all"`) agar bentuk lama
+  tetap benar — dicoba implementer, ditolak cargo:
+  `error: alias fmt has unresolvable recursive definition: fmt -> fmt`.
+- `[workspace] default-members` di `src-tauri/Cargo.toml` — memindahkan
+  pemilihan paket ke berkas yang jarang dibaca, sehingga perintah yang sama
+  bermakna berbeda tergantung isi manifest. Juga tidak pasti memengaruhi
+  `cargo-fmt`, yang punya jalur pemilihan paketnya sendiri.
+- Membiarkannya sebagai "Known gap" di README — persis bentuk konvensi tanpa
+  penegakan yang sudah ditolak dua kali di ADR-0013 dan ADR-0016.
+
+**Konsekuensi yang diterima.** Dua perintah menjadi lebih panjang dan tidak lagi
+seragam dengan `clippy`, yang tidak memakai `--all`. Ketidakseragaman itu akan
+tampak seperti kelalaian dan berpotensi "dirapikan" oleh pembaca berikutnya —
+entri ini dan komentar di README adalah penjaganya. Lebih penting: bentuk lama
+sudah tercetak di `.claude/agents/*.md` dan di riwayat PROGRESS.md. Riwayat
+bersifat append-only dan dibiarkan apa adanya; definisi agent perlu disesuaikan
+oleh pengguna, karena berkas itu di luar wewenang tulis `project-lead`.

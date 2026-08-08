@@ -52,12 +52,23 @@ berikutnya, bukan perbaikan lain yang kebetulan kamu lihat.
 Jalankan yang tersedia, jangan berasumsi:
 
 ```
-cargo fmt   --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
-cargo test  --manifest-path src-tauri/Cargo.toml
+cargo fmt   --all       --manifest-path src-tauri/Cargo.toml -- --check
+cargo clippy            --manifest-path src-tauri/Cargo.toml -- -D warnings
+cargo test  --workspace --manifest-path src-tauri/Cargo.toml
 npm run lint
 npm run typecheck
+npm test
 ```
+
+`--all` / `--workspace` wajib, dan bukan sekadar kerapian — lihat
+[ADR-0020](../../decisions.md#adr-0020). `--manifest-path` menamai **paket**
+`aeroworship`, bukan workspace, sehingga `cargo fmt` dan `cargo test` tanpa flag
+itu melewati crate `aeroworship-core` sepenuhnya dan **exit 0 secara palsu** —
+terbukti empiris atas core yang sengaja dirusak-format dengan `#[test]` yang
+pasti gagal. Seluruh logika correctness-critical PRD §6.1 hidup di crate itu.
+`cargo clippy` tidak perlu flag: mekanismenya berbeda, ia melewatkan seluruh
+workspace member lewat `RUSTC_WORKSPACE_WRAPPER`. Jangan "merapikan" ketiganya
+agar seragam.
 
 Bila sebuah perintah belum ada karena scaffolding belum lengkap, katakan
 demikian di laporan — jangan diam-diam melewatinya.

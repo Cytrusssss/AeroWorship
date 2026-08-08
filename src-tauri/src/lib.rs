@@ -29,20 +29,30 @@
 // binary behaves perfectly and the defect only surfaces on a user's machine.
 // That is why this is a compile error and not a note in the README.
 //
-// The condition is read through `tauri::is_dev()`, which is
-// `!cfg!(feature = "custom-protocol")` evaluated inside the `tauri` crate —
-// where the feature actually lives. A `cfg(feature = "custom-protocol")` test
-// in *this* crate would always be false, because the CLI enables the feature as
-// `tauri/custom-protocol` rather than re-exporting it here.
-#[cfg(not(debug_assertions))]
-const _: () = assert!(
-    !tauri::is_dev(),
+// The condition is `cfg(dev)`, an alias `tauri_build::build()` already emits
+// from `src-tauri/build.rs`: it calls `cfg_alias("dev", is_dev())`, which
+// prints `cargo:rustc-check-cfg=cfg(dev)` and, when dev, `cargo:rustc-cfg=dev`.
+// So the flag is read where the feature actually lives, with no build script of
+// our own — and `#[cfg(not(dev))]` is the form Tauri's own CLI changelog tells
+// application crates to use, in place of testing
+// `cfg(feature = "custom-protocol")` here (that test would always be false,
+// since the CLI enables the feature as `tauri/custom-protocol` rather than
+// re-exporting it) — ADR-0018.
+//
+// `debug_assertions` is the proxy for "this is a release profile". It is a
+// proxy, not the thing itself: see the cross-note on `[profile.release]` in
+// `Cargo.toml` before changing either side.
+#[cfg(all(not(debug_assertions), dev))]
+compile_error!(
     "release build without tauri's `custom-protocol` feature: this binary would \
      load its UI from http://localhost:1420 instead of the embedded `dist/`. \
      Build with `npm run tauri build`, not `cargo build --release` — the Tauri \
      CLI builds the frontend first and enables `tauri/custom-protocol`. If you \
      really do want plain Cargo, pass `--features tauri/custom-protocol` and \
-     make sure `dist/` is up to date yourself."
+     make sure `dist/` is up to date yourself. The same flag is the way to run \
+     a release-profile test or benchmark, which this guard also rejects: \
+     `cargo test --release -p aeroworship --features tauri/custom-protocol` \
+     (ADR-0019)."
 );
 
 /// Builds and runs the Tauri application.

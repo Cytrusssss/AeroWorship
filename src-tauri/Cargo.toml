@@ -54,6 +54,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [profile.release]
+# Cross-marker for the `custom-protocol` guard in `src/lib.rs` (ADR-0018,
+# auditor finding S9). That guard fires on `all(not(debug_assertions), dev)` —
+# it uses `debug_assertions` as its proxy for "this is a release profile".
+# The proxy is not the thing itself: setting `debug-assertions = true` below,
+# or passing `-C debug-assertions=on` through `RUSTFLAGS`, disarms the guard
+# silently and lets a release binary ship that loads its UI from
+# `http://localhost:1420`. The value is stated rather than left to the profile
+# default so that anyone flipping it sees this note in the same diff.
+debug-assertions = false
 # NFR-16 keeps the installer under 15 MB; the binary is the largest single
 # contributor, so the release profile optimises for size, not speed.
 opt-level = "s"
