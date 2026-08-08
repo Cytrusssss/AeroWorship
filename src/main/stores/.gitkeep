@@ -1,0 +1,2 @@
+# Pinia stores, Control Panel only (PRD §6.12). Pinia itself is not installed
+# yet — the first item with state to manage adds it.

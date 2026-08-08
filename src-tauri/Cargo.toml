@@ -1,0 +1,65 @@
+# Workspace root. `src-tauri/` stays the root (rather than the repository root)
+# because `tauri-cli`, `tauri-build` and `tauri.conf.json` resolution all assume
+# the app package lives at `src-tauri/Cargo.toml`; keeping the workspace here
+# also keeps `target/` where `.gitignore` already expects it.
+[workspace]
+members = ["crates/core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+publish = false
+
+# The Tauri shell package. It owns the window, the event bus and the IPC
+# surface; every piece of domain logic belongs to `aeroworship-core`, which
+# cannot depend on `tauri` (ADR-0008).
+[package]
+name = "aeroworship"
+description = "Offline-first church presentation software for Windows."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+aeroworship-core = { path = "crates/core" }
+# This is the `tauri` 2.11.5 default feature set minus `dynamic-acl`, spelled
+# out on purpose — do not "tidy" it back to defaults (ADR-0013). `dynamic-acl`
+# enables `Manager::add_capability()`, which parses a capability from any
+# `AsRef<str>` at runtime; a permission could then be granted without ever
+# appearing in `capabilities/*.json` or `gen/schemas/capabilities.json`, which
+# defeats the NFR-14 verification method ("Capability manifest reviewed at each
+# release"). `compression` must stay: dropping it grows the binary (GATE-G5).
+# `x11`/`dbus` are Linux-only no-ops here but are kept so the list stays a
+# faithful "defaults minus one".
+#
+# Note this does not remove `reqwest`/`hyper`/`tower`, which were evaluated for
+# NFR-16: `tauri` declares them under
+# `cfg(any(target_os = "android", all(target_vendor = "apple", not(target_os = "macos"))))`,
+# so they are locked in `Cargo.lock` (which is target-agnostic) but never
+# compiled or linked on Windows. GATE-G6 therefore has to be proven at runtime,
+# not from the lockfile.
+tauri = { version = "2", default-features = false, features = [
+    "wry",
+    "compression",
+    "common-controls-v6",
+    "x11",
+    "dbus",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+# NFR-16 keeps the installer under 15 MB; the binary is the largest single
+# contributor, so the release profile optimises for size, not speed.
+opt-level = "s"
+lto = true
+codegen-units = 1
+# `unwind`, not `abort`: a panic inside the output window must not take the
+# Control Panel down mid-service (NFR-08 / GATE-G7) — ADR-0009.
+panic = "unwind"
+strip = true

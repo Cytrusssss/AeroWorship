@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/windows-schema.json",
+  "identifier": "main-window",
+  "description": "Minimal capability set for the Control Panel window (NFR-14). Permissions are added by the item whose FR actually needs them, never in anticipation. Granted today: core:event:default only (allow-listen, allow-unlisten, allow-emit, allow-emit-to) — the frontend<->backend event bus, and the slide-advance hot path, which broadcasts an event instead of awaiting a command (PRD 6.5). Deliberately NOT granted: core:default, which also pulls in core:app, core:path, core:image, core:resources, core:menu, core:tray and core:webview; and core:window:default, whose 28 permissions include allow-available-monitors, allow-primary-monitor, allow-current-monitor and allow-monitor-from-point. Display enumeration is a backend responsibility (FR-101) and the output window's whole lifecycle belongs to the Rust Display Service (PRD 6.3); granting the window API would open a second, ACL-legitimate path to the same facts and leave the frontend with two sources of truth. The main window is created from tauri.conf.json, not from the frontend, so no window permission is needed at all. No filesystem, dialog, shell or HTTP permission is granted either.",
+  "windows": ["main"],
+  "permissions": ["core:event:default"]
+}

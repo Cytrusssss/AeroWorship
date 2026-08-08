@@ -1,0 +1,15 @@
+# Domain crate. It must never gain a dependency on `tauri`, `wry`, `tao` or any
+# other windowing/webview crate — that constraint is the whole point of the
+# split (ADR-0008) and it is what keeps `cargo test -p aeroworship-core` fast.
+[package]
+name = "aeroworship-core"
+description = "Domain logic for AeroWorship: models, storage, parsing, serialisation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Intentionally empty. `serde`, `rusqlite` and friends are added by the item
+# that first needs them, so the crate's test cycle stays as cheap as ADR-0008
+# claims.
+[dependencies]

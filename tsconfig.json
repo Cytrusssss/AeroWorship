@@ -1,0 +1,20 @@
+{
+  // Deliberately minimal: only what Vite needs to transpile `.ts` and the
+  // `<script lang="ts">` blocks of `.vue`. Strictness flags, project references
+  // and the `vue-tsc` type-check pass are SETUP-03, not this item.
+  "compilerOptions": {
+    // WebView2 on Windows 10 1809+ is evergreen Chromium (NFR-17), so a modern
+    // target is safe; Vite's own `build.target` is what actually gates output.
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    // Vite emits; tsc is only ever used for checking.
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.vue", "vite.config.ts"]
+}
