@@ -1,7 +1,12 @@
 // @ts-check
 
 /**
- * Build-time guard for the production CSP's `style-src 'self'` (ADR-0015).
+ * Build-time guard for the production CSP's `style-src 'self'` (ADR-0015):
+ * everything it decides, in pure functions. Four stages — choosing which
+ * documents of a `dist/` listing have to be opened (`selectDocuments`),
+ * scanning one for markup the CSP forbids (`findCspViolations`), asking whether
+ * it loads anything at all (`hasModuleScript`), and turning the per-document
+ * results into counts and an exit code (`summariseDocuments`).
  *
  * The CSP in `src-tauri/tauri.conf.json` is only applied to documents served
  * over `tauri://localhost`, so it is never enforced during `tauri dev`, and
@@ -14,13 +19,57 @@
  * also covers `npm run tauri build` (`beforeBuildCommand: "npm run build"`).
  *
  * Nothing here parses HTML properly on purpose. A tolerant scanner that
- * over-reports is the right shape for a guard: the three constructs below are
- * things the build must never emit at all, so a false positive is a five-minute
- * conversation while a false negative ships a window that renders unstyled.
+ * over-reports is the right shape for the CSP half: the three constructs
+ * `findCspViolations` looks for are things the build must never emit at all, so
+ * a false positive is a five-minute conversation while a false negative ships a
+ * window that renders unstyled. `hasModuleScript` errs the other way round for
+ * the same reason — a start tag it fails to recognise reads as "this document
+ * loads nothing", which is the noisy answer, not the quiet one.
  *
- * Kept free of I/O so it can be unit-tested; `check-dist-html.js` is the thin
- * script that reads files and exits.
+ * Kept free of I/O so every decision this guard makes can be unit-tested;
+ * `check-dist-html.js` is the thin script that reads files, prints and exits.
+ * That split is not tidiness. A decision that lives only in the script is a
+ * decision no test can reach, so deleting it leaves all six gate commands green
+ * — the ADR-0020 failure class, which is what this guard exists to close.
  */
+
+/**
+ * Chooses which entries of a directory listing this guard has to open, and
+ * reports which of the documents the build was supposed to emit are absent.
+ *
+ * A recursive `readdir` returns paths joined with the platform separator, so on
+ * Windows a nested hit arrives as `pages\x.html`. Measured on Node 22.16:
+ * `new URL()` does resolve that correctly, because WHATWG treats `\` as `/` for
+ * special schemes and `file:` is one — so the caller's read would work either
+ * way. Normalising is still not cosmetic. It is what makes the `expected`
+ * membership test below separator-independent, and what keeps a name in a
+ * diagnostic in the `dist/pages/x.html` form the reader will paste back into a
+ * command.
+ *
+ * `expected` names are compared against whole relative paths, so a name without
+ * a directory part is a claim that the document sits at the root of the scanned
+ * directory. See `EXPECTED_DOCUMENTS` in `check-dist-html.js`.
+ *
+ * Note that a *directory* whose name ends in `.html` is selected too: the raw
+ * listing is strings, and nothing here touches the file system to find out. The
+ * caller is what turns the failed read into a named diagnostic.
+ *
+ * @param {readonly string[]} entries Raw result of `readdir(dir, { recursive: true })`.
+ * @param {readonly string[]} expected Documents the build must have emitted.
+ * @returns {{ documents: string[], missing: string[] }} Every `.html` entry,
+ *   separator-normalised and sorted, and the `expected` names not among them.
+ */
+export function selectDocuments(entries, expected) {
+  const documents = entries
+    .map((entry) => entry.replaceAll('\\', '/'))
+    .filter((name) => name.toLowerCase().endsWith('.html'))
+    .sort()
+
+  return {
+    documents,
+    missing: expected.filter((name) => !documents.includes(name)),
+  }
+}
 
 /**
  * @typedef {'style-element' | 'style-attribute' | 'inline-script'} ViolationKind
@@ -174,4 +223,121 @@ export function findCspViolations(html) {
  */
 export function formatViolation(file, violation) {
   return `${file}:${violation.line}:${violation.column}  ${violation.kind}  ${violation.reason}\n    ${violation.excerpt}`
+}
+
+/**
+ * A `<script …>` start tag and everything between its name and the `>`. Void of
+ * any attempt to handle a `>` inside an attribute value, which the HTML
+ * tokenizer allows: a start tag written that way would be cut short here and
+ * the scan would move on. Vite emits nothing of the sort, and the direction of
+ * the error is the safe one — a missed script reads as "this document loads
+ * nothing", not as "this document is fine".
+ */
+const SCRIPT_START_TAG = /<script\b([^>]*)>/gi
+
+/**
+ * One attribute of a start tag, in all three value syntaxes plus the valueless
+ * form. Group 1 is the name; groups 2–4 are the double-quoted, single-quoted
+ * and unquoted values.
+ */
+const TAG_ATTRIBUTE =
+  /(?<=^|\s)([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'`=<>]+)))?/g
+
+/**
+ * Whether a built document loads at least one external ES module — that is, a
+ * `<script>` start tag carrying both `type="module"` and a non-empty `src`, in
+ * any attribute order and any case. The shape `vite build` emits today is
+ * `<script type="module" crossorigin src="/assets/main-<hash>.js"></script>`,
+ * read off `dist/index.html` and `dist/output.html` rather than recalled.
+ *
+ * This is the one assertion in this file that is positive rather than a denial.
+ * Everything else here answers "does the document contain something forbidden",
+ * and a zero-byte `dist/output.html` answers no to all of it — so without this,
+ * a build that emitted an empty document counted as clean, and the first
+ * symptom would have been a blank projector during a service.
+ *
+ * What it does not check: that the `src` resolves to a file that exists, that
+ * the file parses, or that the module is the right one. All it separates is
+ * "this document names an entry point" from "this document names none" — a
+ * document in the second group can still be full of markup.
+ *
+ * @param {string} html Contents of a built HTML document.
+ * @returns {boolean}
+ */
+export function hasModuleScript(html) {
+  for (const tag of html.matchAll(SCRIPT_START_TAG)) {
+    /** @type {Map<string, string>} */
+    const attributes = new Map()
+    for (const attribute of (tag[1] ?? '').matchAll(TAG_ATTRIBUTE)) {
+      // First occurrence wins, which is what the HTML parser does with a
+      // duplicated attribute name.
+      const name = (attribute[1] ?? '').toLowerCase()
+      if (!attributes.has(name)) {
+        attributes.set(name, attribute[2] ?? attribute[3] ?? attribute[4] ?? '')
+      }
+    }
+
+    if (attributes.get('type')?.trim().toLowerCase() !== 'module') continue
+    if ((attributes.get('src') ?? '').trim() !== '') return true
+  }
+
+  return false
+}
+
+/**
+ * @typedef {object} DocumentReport
+ * @property {string} name Path of the document, relative to the scanned directory.
+ * @property {readonly CspViolation[] | null} violations What `findCspViolations`
+ *   returned, or `null` when the document could not be opened at all.
+ * @property {boolean} loadsModule What `hasModuleScript` returned. Only read
+ *   when `violations` is not `null`.
+ */
+
+/**
+ * Folds the per-document results into the three counts the caller prints and
+ * the exit code it returns.
+ *
+ * This lives here rather than in `check-dist-html.js` because when the guard is
+ * allowed to return 0 is the single most consequential line in it, and a line
+ * that only exists inside a script no test can import is a line nothing
+ * defends — the ADR-0020 shape, in the guard written to close it.
+ *
+ * An unreadable document contributes to neither of the other counts: nothing
+ * was read, so nothing is known about its markup or its scripts, and counting
+ * it as blank would send the reader looking for an empty file that may be fine.
+ *
+ * An empty `reports` is a non-zero exit with all three counts at zero. Nothing
+ * was examined, and "nothing was examined" is the one answer this guard must
+ * never dress up as "clean" — its caller checks for that case first and prints
+ * a better diagnostic, but the caller losing that check is exactly the kind of
+ * edit this function exists to survive.
+ *
+ * @param {readonly DocumentReport[]} reports One entry per document opened or attempted.
+ * @returns {{ violations: number, unreadable: number, blank: number, exitCode: number }}
+ *   `violations` totals hits across documents; `unreadable` and `blank` count
+ *   documents. A document can be counted both as carrying violations and as
+ *   blank — an inline `<script>` body is a violation and does not load a module.
+ */
+export function summariseDocuments(reports) {
+  let violations = 0
+  let unreadable = 0
+  let blank = 0
+
+  for (const report of reports) {
+    if (report.violations === null) {
+      unreadable += 1
+      continue
+    }
+    violations += report.violations.length
+    if (!report.loadsModule) blank += 1
+  }
+
+  const clean = reports.length > 0 && violations === 0 && unreadable === 0 && blank === 0
+
+  return {
+    violations,
+    unreadable,
+    blank,
+    exitCode: clean ? 0 : 1,
+  }
 }

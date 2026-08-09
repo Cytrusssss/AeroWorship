@@ -9,7 +9,13 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { findCspViolations, formatViolation } from './dist-html-guard.js'
+import {
+  findCspViolations,
+  formatViolation,
+  hasModuleScript,
+  selectDocuments,
+  summariseDocuments,
+} from './dist-html-guard.js'
 
 /** The shape `vite build` produces today: external module script + linked CSS. */
 const CLEAN_DOCUMENT = `<!doctype html>
@@ -170,5 +176,275 @@ describe('formatViolation', () => {
 
     expect(formatViolation('dist/index.html', violation)).toContain('dist/index.html:1:6')
     expect(formatViolation('dist/index.html', violation)).toContain('style-attribute')
+  })
+})
+
+describe('selectDocuments', () => {
+  // The reason this function was pulled out of `check-dist-html.js` at all.
+  // A recursive `readdir` on Windows returns `pages\x.html`; if that reaches
+  // the `expected` membership test unnormalised, a document the build was
+  // required to emit is reported absent while sitting right there, and the
+  // guard fails a build for the wrong reason. Until this case existed the
+  // guarantee lived in a comment.
+  it('normalises Windows separators and still selects the entry', () => {
+    const { documents, missing } = selectDocuments(['pages\\x.html'], [])
+
+    expect(documents).toEqual(['pages/x.html'])
+    expect(missing).toEqual([])
+  })
+
+  it('matches an expected name against the normalised nested path', () => {
+    const { missing } = selectDocuments(['pages\\output.html'], ['pages/output.html'])
+
+    expect(missing).toEqual([])
+  })
+
+  it('reports an expected document that is absent', () => {
+    const { documents, missing } = selectDocuments(
+      ['index.html'],
+      ['index.html', 'output.html'],
+    )
+
+    expect(documents).toEqual(['index.html'])
+    expect(missing).toEqual(['output.html'])
+  })
+
+  it('reports nothing missing when both expected documents are present', () => {
+    const { documents, missing } = selectDocuments(
+      ['index.html', 'output.html'],
+      ['index.html', 'output.html'],
+    )
+
+    expect(documents).toEqual(['index.html', 'output.html'])
+    expect(missing).toEqual([])
+  })
+
+  it('reports every absent name, not just the first', () => {
+    expect(selectDocuments([], ['index.html', 'output.html']).missing).toEqual([
+      'index.html',
+      'output.html',
+    ])
+  })
+
+  it('drops entries that are not .html', () => {
+    const { documents } = selectDocuments(
+      ['index.html', 'assets/main-ByytIpAi.js', 'assets/main.css', 'vite.svg', 'assets'],
+      [],
+    )
+
+    expect(documents).toEqual(['index.html'])
+  })
+
+  it('accepts an .html suffix in any case', () => {
+    expect(selectDocuments(['INDEX.HTML'], []).documents).toEqual(['INDEX.HTML'])
+  })
+
+  it('leaves a name that merely contains .html in the middle alone', () => {
+    expect(selectDocuments(['index.html.map', 'x.htmlx'], []).documents).toEqual([])
+  })
+
+  it('orders the selected documents deterministically', () => {
+    const listing = ['output.html', 'pages\\b.html', 'index.html', 'pages\\a.html']
+
+    expect(selectDocuments(listing, []).documents).toEqual([
+      'index.html',
+      'output.html',
+      'pages/a.html',
+      'pages/b.html',
+    ])
+    // Same set, different listing order — the caller prints this list and the
+    // reports are built from it, so the order has to come from the function.
+    expect(selectDocuments([...listing].reverse(), []).documents).toEqual(
+      selectDocuments(listing, []).documents,
+    )
+  })
+
+  it('selects a directory whose name ends in .html', () => {
+    // Deliberate: the listing is strings and nothing here touches the file
+    // system. `check-dist-html.js` is what turns the failed read into a named
+    // diagnostic, and it can only do that for a name it was handed.
+    expect(selectDocuments(['weird.html'], []).documents).toEqual(['weird.html'])
+  })
+
+  it('handles an empty expected list', () => {
+    expect(selectDocuments(['index.html'], [])).toEqual({
+      documents: ['index.html'],
+      missing: [],
+    })
+  })
+
+  it('handles an empty listing', () => {
+    expect(selectDocuments([], [])).toEqual({ documents: [], missing: [] })
+  })
+
+  it('does not mutate either argument', () => {
+    const entries = ['output.html', 'index.html']
+    const expected = ['index.html', 'output.html']
+
+    selectDocuments(entries, expected)
+
+    expect(entries).toEqual(['output.html', 'index.html'])
+    expect(expected).toEqual(['index.html', 'output.html'])
+  })
+})
+
+describe('hasModuleScript', () => {
+  it('accepts the exact tag vite build emits', () => {
+    // `crossorigin` sits between `type` and `src`, so a scanner that only
+    // recognises the two attributes adjacent passes this by accident of
+    // nothing. This is the shape read off dist/index.html.
+    expect(
+      hasModuleScript(
+        '<script type="module" crossorigin src="/assets/main-ByytIpAi.js"></script>',
+      ),
+    ).toBe(true)
+  })
+
+  it('accepts the whole document vite build emits', () => {
+    expect(hasModuleScript(CLEAN_DOCUMENT)).toBe(true)
+  })
+
+  it.each([
+    ['reversed attribute order', '<script src="/assets/main.js" type="module"></script>'],
+    ['unquoted values', '<script type=module src=/assets/main.js></script>'],
+    ['single-quoted values', "<script type='module' src='/assets/main.js'></script>"],
+    ['upper case', '<SCRIPT TYPE="MODULE" SRC="/assets/main.js"></SCRIPT>'],
+    ['whitespace around the equals signs', '<script type = "module" src = "/x.js">'],
+    ['padded type value', '<script type=" module " src="/x.js"></script>'],
+    ['a trailing slash on the start tag', '<script type="module" src="/x.js"/>'],
+    [
+      'a second script that carries it',
+      '<script>boot()</script><script type="module" src="/x.js"></script>',
+    ],
+  ])('accepts %s', (_label, html) => {
+    expect(hasModuleScript(html)).toBe(true)
+  })
+
+  it.each([
+    ['an empty document', ''],
+    [
+      'a document with no script at all',
+      '<html><body><div id="app"></div></body></html>',
+    ],
+    ['a module script with no src', '<script type="module">boot()</script>'],
+    ['a module script with an empty src', '<script type="module" src=""></script>'],
+    [
+      'a module script whose src is only whitespace',
+      '<script type="module" src="   "></script>',
+    ],
+    ['a classic script', '<script src="/assets/main.js"></script>'],
+    [
+      'a script of another type',
+      '<script type="text/javascript" src="/assets/main.js"></script>',
+    ],
+    ['a type that merely contains the word', '<script type="nomodule" src="/x.js">'],
+    [
+      'modulepreload, which is a link and loads nothing on its own',
+      '<link rel="modulepreload" crossorigin href="/assets/_helper.js">',
+    ],
+  ])('rejects %s', (_label, html) => {
+    expect(hasModuleScript(html)).toBe(false)
+  })
+
+  it('takes the first spelling of a duplicated attribute, as a parser does', () => {
+    expect(hasModuleScript('<script type="module" src="" src="/x.js"></script>')).toBe(
+      false,
+    )
+    expect(hasModuleScript('<script type="module" src="/x.js" src=""></script>')).toBe(
+      true,
+    )
+  })
+})
+
+describe('summariseDocuments', () => {
+  /**
+   * @param {string} name
+   * @param {number} violations How many hits the document carries.
+   * @param {boolean} loadsModule
+   * @returns {import('./dist-html-guard.js').DocumentReport}
+   */
+  const report = (name, violations, loadsModule) => ({
+    name,
+    violations: Array.from({ length: violations }, () =>
+      first(findCspViolations('<style>')),
+    ),
+    loadsModule,
+  })
+
+  /**
+   * @param {string} name
+   * @returns {import('./dist-html-guard.js').DocumentReport}
+   */
+  const unreadable = (name) => ({ name, violations: null, loadsModule: false })
+
+  it('returns a non-zero exit code for an empty report list', () => {
+    // Fail-closed on purpose. "Nothing was examined" is the one answer this
+    // guard must never dress up as "clean" — the caller checks for it first and
+    // prints a better message, but the caller losing that check is exactly the
+    // edit this is here to survive (ADR-0020).
+    expect(summariseDocuments([])).toEqual({
+      violations: 0,
+      unreadable: 0,
+      blank: 0,
+      exitCode: 1,
+    })
+  })
+
+  it('returns 0 only when something was examined and all of it was clean', () => {
+    expect(summariseDocuments([report('index.html', 0, true)])).toEqual({
+      violations: 0,
+      unreadable: 0,
+      blank: 0,
+      exitCode: 0,
+    })
+    expect(
+      summariseDocuments([report('index.html', 0, true), report('output.html', 0, true)])
+        .exitCode,
+    ).toBe(0)
+  })
+
+  // The full matrix, because each of the three counts can independently hold
+  // the exit code away from zero and a single combination going quiet is how a
+  // failing build starts passing.
+  it.each([
+    ['violations only', [report('a.html', 2, true)], 2, 0, 0],
+    ['unreadable only', [unreadable('a.html')], 0, 1, 0],
+    ['blank only', [report('a.html', 0, false)], 0, 0, 1],
+    [
+      'violations and unreadable',
+      [report('a.html', 1, true), unreadable('b.html')],
+      1,
+      1,
+      0,
+    ],
+    ['violations and blank', [report('a.html', 1, false)], 1, 0, 1],
+    ['unreadable and blank', [unreadable('a.html'), report('b.html', 0, false)], 0, 1, 1],
+    ['all three', [report('a.html', 3, false), unreadable('b.html')], 3, 1, 1],
+  ])('fails with %s', (_label, reports, violations, unreadableCount, blank) => {
+    expect(summariseDocuments(reports)).toEqual({
+      violations,
+      unreadable: unreadableCount,
+      blank,
+      exitCode: 1,
+    })
+  })
+
+  it('totals violations across documents but counts blanks per document', () => {
+    const summary = summariseDocuments([
+      report('a.html', 2, false),
+      report('b.html', 3, false),
+    ])
+
+    expect(summary.violations).toBe(5)
+    expect(summary.blank).toBe(2)
+  })
+
+  it('lets an unreadable document contribute to neither other count', () => {
+    // `loadsModule` is false on an unreadable report because nothing was read,
+    // not because the document is blank. Counting it as blank would send the
+    // reader looking for an empty file that may be perfectly fine.
+    const summary = summariseDocuments([unreadable('a.html'), unreadable('b.html')])
+
+    expect(summary).toEqual({ violations: 0, unreadable: 2, blank: 0, exitCode: 1 })
   })
 })

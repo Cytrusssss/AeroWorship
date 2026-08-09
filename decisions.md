@@ -888,3 +888,82 @@ entri ini dan komentar di README adalah penjaganya. Lebih penting: bentuk lama
 sudah tercetak di `.claude/agents/*.md` dan di riwayat PROGRESS.md. Riwayat
 bersifat append-only dan dibiarkan apa adanya; definisi agent perlu disesuaikan
 oleh pengguna, karena berkas itu di luar wewenang tulis `project-lead`.
+
+### ADR-0021 — Batas bundle dicocokkan atas string specifier, bukan path yang diresolve
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-08 |
+| Status | Diterima |
+| Terkait | SETUP-03, ADR-0020, PRD §6.3, PRD §5.1 |
+
+**Keputusan.** Kedua guard batas bundle di `eslint.config.js` — `MAIN_IMPORT_GROUPS`
+dan `DYNAMIC_MAIN_IMPORT_SELECTORS` — tetap mencocokkan **teks specifier**, bukan
+path yang sudah diresolve. Konsekuensinya diterima secara sadar: specifier yang
+memuat segmen `main` berdiri sendiri ikut terjaring meski tidak menunjuk
+`src/main/`, mis. `./main`, `./widgets/main/x`, `somelib/main`. Yang diperbaiki
+bukan aturannya, melainkan **klaim di sekitarnya** — JSDoc yang berbunyi "import
+specifiers that resolve into `src/main/`" diganti dengan kalimat yang benar, dan
+pesan pelanggarannya menyebutkan kemungkinan false positive beserta jalan
+keluarnya.
+
+**Alasan.** Tester siklus 2 melaporkan enam bentuk terjaring padahal tak satupun
+menyentuh `src/main/`. Dampak nyatanya hari ini nol — tidak ada berkas atau
+direktori bernama `main` di bawah `src/output/` maupun `src/shared/`, dan tidak
+ada dependency yang diimpor lewat subpath `main`. Yang membuatnya tetap dicatat
+sebagai kegagalan adalah komentarnya, bukan perilakunya: komentar mengklaim
+presisi yang tidak dimiliki kodenya, yaitu persis kelas kegagalan yang seluruh
+siklus 2 dibuka untuk menutupnya (ADR-0020).
+
+Untuk impor statik, keluasan ini **pra-ada** — `MAIN_IMPORT_GROUPS` identik dengan
+daftar siklus 1 yang sudah diluluskan; refactor tidak mengubahnya. Yang baru di
+siklus 2 hanyalah perambatannya ke jalur dinamis, lewat cabang `$` pada
+`(^|/)main(/|$)` yang ditambahkan untuk menutup `import('../main')`. Menutup
+celah itu tanpa membawa keluasannya berarti memperlakukan bentuk statik dan
+dinamis secara berbeda — dua aturan yang menjaga satu kontrak, dengan himpunan
+yang tidak sama. Itu lebih buruk.
+
+**Alternatif yang ditolak.**
+- **Resolusi path sungguhan** (`eslint-plugin-import` dengan resolver, atau rule
+  kustom yang memanggil `resolve`): menghilangkan false positive, tetapi menambah
+  dependency dan menuntut pass resolusi per berkas per run. `tsconfig.json` sudah
+  menolak `recommendedTypeChecked` atas alasan biaya yang sama; menerimanya di
+  sini untuk masalah yang lebih kecil tidak konsisten.
+- **Negasi gitignore** (`group: ['**/main', '!./main', …]`) untuk mengecualikan
+  bentuk relatif-sendiri: bekerja, tetapi mengubah daftar yang terbaca jelas
+  menjadi teka-teki, dan salah-baca satu negasi melubangi guard tanpa gejala.
+- **Menyempitkan regex ke `\.\./main`**: mematikan bentuk alias `@/main` dan
+  bentuk relatif dalam yang justru paling mungkin dipakai.
+
+**Konsekuensi yang diterima.** Seseorang yang menamai direktori `main` di dalam
+`src/output/` atau `src/shared/` akan tertahan lint dengan pesan yang, sebelum
+perbaikan ini, menceritakan masalah yang bukan masalahnya. Arah kesalahannya
+disengaja: guard batas bundle lebih baik gagal-tertutup dan berisik daripada
+gagal-terbuka dan senyap, karena biaya false negative-nya adalah bundle projector
+yang membengkak tanpa gejala sampai seseorang mengukur memori (PRD §5.1). False
+positive-nya keras, langsung terlihat, dan jalan keluarnya — menamai ulang
+direktori — lebih murah daripada infrastruktur resolusi path.
+
+### ADR-0022 — Guard `dist/*.html` tidak memeriksa origin subresource; ditunda ke item pertama yang menyentuhnya
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-09 |
+| Status | Diterima (penundaan sadar) |
+| Terkait | SETUP-03, ADR-0015, NFR-13, FR-606, PRD §5.1 |
+
+**Keputusan.** Temuan auditor siklus 4–5 (`scripts/dist-html-guard.js:281`) **ditunda**, tidak diperbaiki di SETUP-03. Asersi positif `hasModuleScript` menerima `src` apa pun yang tidak kosong, termasuk `https://cdn…`, dan `findCspViolations` tidak memeriksa `<link rel="stylesheet" href="https://…">`. Penundaan ini dicatat di sini sesuai H2, dan menjadi **persyaratan yang dibawa** oleh item pertama yang benar-benar menambahkan subresource ke `src/index.html` atau `src/output.html`.
+
+**Alasan.** Lubangnya nyata dan menyentuh NFR-13: di `tauri dev` CSP tidak ditegakkan ([ADR-0015](#adr-0015)), sehingga sumber daya remote akan diam-diam ditarik dari jaringan dan tampak bekerja; di build rilis `default-src 'self'` menolaknya dan jendela terbuka kosong — persis kegagalan yang `hasModuleScript` ditambahkan untuk menangkap.
+
+Yang membuatnya layak ditunda adalah pemicunya. Ia menuntut seseorang menuliskan URL remote ke dalam salah satu dari dua berkas HTML yang ditulis tangan — tindakan yang tidak akan lolos review di aplikasi yang seluruh premisnya offline-first, dan yang hari ini tidak ada wujudnya: kedua dokumen memuat tepat satu `<script type="module" src>` relatif yang dibangkitkan Vite.
+
+Yang membuatnya **tidak** boleh dilupakan adalah arah kegagalannya. Guard ini gagal-terbuka untuk kasus itu: build yang menarik CDN dilaporkan "clean". Seluruh sisa permukaan guard sudah gagal-tertutup, jadi ini satu-satunya pengecualian, dan pengecualian tanpa catatan adalah bagaimana ADR-0020 lahir.
+
+**Alternatif yang ditolak.**
+- **Memperbaikinya sekarang.** SETUP-03 sudah lima siklus. Menambah cara baru guard menolak build berarti satu putaran tester penuh lagi untuk permukaan yang belum punya pemakai, sementara auditor menilai — dan saya setuju — bahwa tiga permukaan yang paling mahal bila salah sudah tertutup dan tidak ada lagi temuan bertipe gagal-terbuka selain yang satu ini.
+- **Melarang subresource remote lewat komentar di kedua berkas HTML.** Bentuk konvensi tanpa penegakan yang sudah ditolak di ADR-0013, ADR-0016, dan ADR-0020.
+
+**Konsekuensi yang diterima.** Sampai item itu datang, satu-satunya penjaga terhadap subresource remote adalah CSP saat runtime rilis — yang gejalanya adalah jendela kosong di tengah ibadah, bukan build merah. Itu justru gejala yang paling mahal, dan itulah alasan penundaan ini ditulis sebagai persyaratan yang dibawa, bukan sebagai backlog.
+
+**Bentuk perbaikannya, agar item berikutnya tidak perlu menemukannya lagi.** Perlakukan `src`/`href` yang memuat skema (`://`) atau berawalan `//` sebagai temuan tersendiri — bukan sebagai "dokumen tidak memuat modul", karena pesan itu akan mengarahkan pembaca ke `build.rollupOptions.input` yang tidak ada hubungannya. Pesannya menyebut NFR-13.

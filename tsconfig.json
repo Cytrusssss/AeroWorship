@@ -33,11 +33,48 @@
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true
   },
+  // Anything Vite can bundle or Vitest can run, or the gate that claims to
+  // check it is checking a subset of it. The nine `src/**` entries are the same
+  // set as `SOURCE_EXTENSIONS` in `eslint.config.js`, which is where the
+  // measurement behind it is written down; tsconfig globs have no brace
+  // expansion, so the set has to be spelled out here instead of shared as a
+  // constant, and a spelling present in one file and absent from the other is a
+  // file that one gate guards and this one never reads. While this list stopped
+  // at `.ts`/`.vue`, a plain `src/shared/x.js` was invisible to `vue-tsc` even
+  // though `checkJs` is on, and `src/**/*.ts` never did match `x.mts`.
+  //
+  // `scripts/**` and `tests/**` carry the same spellings for the same reason
+  // they do in `vitest.config.ts`: a file that runs in the suite but is never
+  // type-checked is the ADR-0020 shape. The root config files are named
+  // individually rather than globbed, so a new one has to be added here by
+  // hand.
   "include": [
+    "src/**/*.js",
+    "src/**/*.mjs",
+    "src/**/*.cjs",
+    "src/**/*.jsx",
     "src/**/*.ts",
-    "src/**/*.d.ts",
+    "src/**/*.mts",
+    "src/**/*.cts",
+    "src/**/*.tsx",
     "src/**/*.vue",
     "scripts/**/*.js",
+    "scripts/**/*.mjs",
+    "scripts/**/*.cjs",
+    "scripts/**/*.jsx",
+    "scripts/**/*.ts",
+    "scripts/**/*.mts",
+    "scripts/**/*.cts",
+    "scripts/**/*.tsx",
+    "tests/**/*.js",
+    "tests/**/*.mjs",
+    "tests/**/*.cjs",
+    "tests/**/*.jsx",
+    "tests/**/*.ts",
+    "tests/**/*.mts",
+    "tests/**/*.cts",
+    "tests/**/*.tsx",
+    "eslint.config.js",
     "vite.config.ts",
     "vitest.config.ts"
   ]
