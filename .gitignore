@@ -32,3 +32,90 @@ Thumbs.db
 # Dua berikut tidak dilacak — per-mesin, dan bukan buatan project ini.
 .claude/settings.local.json
 .claude/skills/
+
+# --- Secrets ---
+# Repo ini belum punya berkas env dan roadmap belum menyebut satu pun; polanya
+# preventif, supaya yang pertama kali membutuhkannya tidak bergantung pada
+# ingatan seseorang untuk menambah baris ini lebih dulu.
+# Tidak ada `!.env.example`: menulis pengecualian untuk berkas yang belum
+# diputuskan akan ada menghasilkan aturan yang tidak pernah teruji.
+.env*
+
+# --- Artefak database dev ---
+# Data root sesungguhnya adalah %APPDATA%\AeroWorship (PRD §6.9) — DI LUAR
+# repo. Jadi pola ini tidak menjaga jalur normal aplikasi, dan tampak salah
+# alamat kalau dibaca sekilas; jangan "rapikan". Yang dijaga adalah artefak dev
+# yang nyasar: database yang terbentuk dengan path relatif saat eksperimen,
+# salinan yang ditarik ke repo untuk diperiksa, keluaran test yang lupa
+# dibersihkan. Begitu SETUP-04 membuat skemanya, isi berkas itu di mesin siapa
+# pun adalah lirik dan susunan ibadah nyata — data jemaat. Mencabutnya dari
+# riwayat git jauh lebih mahal daripada menjaganya sebelum berkasnya ada.
+# `-wal`/`-shm` adalah sibling WAL milik SQLite (PRD §6.9), bukan ekstensi.
+*.db
+*-wal
+*-shm
+*.sqlite*
+
+# --- Log ---
+# Log aplikasi juga hidup di bawah data root, di luar repo; ini sekali lagi
+# menjaga salinan yang nyasar. NFR-34 melarang konten ibadah masuk ke log,
+# tetapi path lokal dan nama berkas milik operator tetap ikut terbawa.
+*.log
+
+# --- Dokumen pengguna ---
+# `.aero` (susunan ibadah) dan `.aerotpl` (template) adalah dokumen jemaat.
+# Satu berkas yang ter-commit karena dipakai mencoba sesuatu membawa lirik dan
+# susunan ibadah nyata ke dalam riwayat.
+*.aero
+*.aerotpl
+
+# Pengecualian, dan alasannya harus ikut terbaca: NFR-15 menuntut "hostile path
+# fixtures" dan NFR-28 menuntut korpus berkas termutasi. Keduanya berkas
+# `.aero`/`.aerotpl` yang HARUS masuk repo agar test-nya bermakna. Tanpa
+# pengecualian ini kegagalannya senyap — `git status` tidak menyebut berkas
+# yang diabaikan, jadi penulis fixture mengira sudah ter-commit sampai CI atau
+# mesin lain gagal menjalankannya.
+# Penandanya adalah direktori bernama `fixtures`, bukan lokasinya: berlaku sama
+# untuk tests/{unit,integration,perf}/fixtures/ (PRD §6.13) maupun
+# src-tauri/crates/*/tests/fixtures/ (konvensi Cargo), sehingga penulis fixture
+# tidak bisa salah taruh selama nama direktorinya benar. `/**/` di tengah cocok
+# dengan nol direktori juga, jadi satu baris per ekstensi sudah menutup berkas
+# tepat di dalam `fixtures/` maupun di subdirektorinya — sudah diverifikasi
+# dengan `git check-ignore -v`, bukan disimpulkan dari membaca aturan.
+# Sengaja hanya dua ekstensi ini, bukan `!**/fixtures/**`: pola secrets,
+# database, dan log di atas tetap berlaku bahkan di dalam fixtures/.
+!**/fixtures/**/*.aero
+!**/fixtures/**/*.aerotpl
+
+# --- Autosave sesi ---
+# Isinya setara `.aero`: susunan ibadah yang sedang dikerjakan (FR-707).
+# Namanya cukup spesifik untuk dipakai telanjang. `config.json` (PRD §6.9)
+# SENGAJA tidak diabaikan — pola telanjang bernama seumum itu cocok di
+# kedalaman berapa pun dan bertabrakan dengan berkas config yang sah, sementara
+# isinya hanya penugasan display dan preferensi, bukan data jemaat.
+session.autosave.json
+
+# --- Cache render dan media ---
+# Ber-anchor `/` dengan sengaja, dan itu bagian dari aturannya: `cache` dan
+# `media` adalah nama direktori yang terlalu umum untuk dipakai telanjang — pola
+# telanjang cocok di kedalaman berapa pun dan akan menelan `src/…/media/` atau
+# `src/…/cache/` yang sah tanpa satu pun tanda di `git status`. Anchor karenanya
+# menutup bentuk akar saja — salinan-sebagai-direktori (`AeroWorship/cache/…`,
+# PRD §6.9) lolos. Sisanya ke pemeriksa staged-content
+# [ADR-0023](decisions.md#adr-0023), yang menilai APA yang di-stage dan bukan di
+# mana, sehingga ia menutup bentuk lokasi mana pun; pola berbasis-lokasi tidak
+# akan pernah bisa.
+# Mengapa ada: `cache/decks/{deck_uuid}/` berisi render visual penuh khotbah
+# nyata — teks slide dan foto yang dirasterisasi ke `.webp` (PRD §6.10) — jadi
+# seringkali LEBIH terbaca daripada `.aero`, yang hanya memuat UUID referensi.
+# Menjaga wadahnya tanpa render-nya bukan penjagaan. `media/` adalah gambar yang
+# ditambahkan pengguna sendiri, dan tidak ada pola ekstensi di atas yang
+# menyentuhnya.
+# Dua jalur yang membawanya ke repo nyata: men-debug import pipeline, komponen
+# paling berisiko di MVP (R1, PRD §6.10), yang paling wajar dilakukan dengan
+# menyalin data root ke sini untuk memeriksa keluaran rasterisasi; dan FR-705
+# yang menuntut uji relink dengan session beserta folder media-nya dipindahkan
+# bersama, yang mengharuskan bundel `.aero` dan folder media nyata duduk
+# berdampingan di working dir.
+/cache/
+/media/

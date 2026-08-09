@@ -967,3 +967,59 @@ Yang membuatnya **tidak** boleh dilupakan adalah arah kegagalannya. Guard ini ga
 **Konsekuensi yang diterima.** Sampai item itu datang, satu-satunya penjaga terhadap subresource remote adalah CSP saat runtime rilis — yang gejalanya adalah jendela kosong di tengah ibadah, bukan build merah. Itu justru gejala yang paling mahal, dan itulah alasan penundaan ini ditulis sebagai persyaratan yang dibawa, bukan sebagai backlog.
 
 **Bentuk perbaikannya, agar item berikutnya tidak perlu menemukannya lagi.** Perlakukan `src`/`href` yang memuat skema (`://`) atau berawalan `//` sebagai temuan tersendiri — bukan sebagai "dokumen tidak memuat modul", karena pesan itu akan mengarahkan pembaca ke `build.rollupOptions.input` yang tidak ada hubungannya. Pesannya menyebut NFR-13.
+
+### ADR-0023 — Fixture `.aero` mencabut satu-satunya sinyal yang menahan dokumen ibadah; guard-nya dibawa ke SETUP-05
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-09 |
+| Status | Diterima (penundaan sadar, dengan pemilik) |
+| Terkait | SETUP-06, SETUP-05, NFR-15, NFR-28, NFR-13, FR-706 |
+
+**Keputusan.** Temuan auditor SETUP-06 (`.gitignore:87-88`) **tidak dapat ditutup di SETUP-06** dan dibawa ke **SETUP-05** sebagai persyaratan, bukan sebagai backlog. `.gitignore` bukan alatnya.
+
+**Masalahnya.** `*.aero` dan `*.aerotpl` diabaikan justru karena isinya dokumen jemaat. NFR-15 ("hostile path fixtures") dan NFR-28 (korpus berkas termutasi) menuntut sebagian berkas itu **ada di repo**, sehingga `!**/fixtures/**/*.aero` wajib ada. Tetapi pengecualian itu bekerja dengan mencabut satu-satunya sinyal yang selama ini menahan `.aero`: keterabaian. Di dalam `fixtures/`, berkas ibadah nyata tampak normal di `git status` dan lolos seperti berkas biasa.
+
+**Mengapa jalurnya realistis, bukan teoretis.** Justru fixture terpenting yang paling berisiko. NFR-28 menuntut korpus termutasi; cara termudah membuatnya adalah mengambil `.aero` valid dan memutasinya, dan `.aero` valid paling gampang didapat di mesin developer adalah susunan ibadah sungguhan. FR-706 memperberatnya: portable export **menyematkan teks lirik penuh** agar berkasnya mandiri — persis sifat yang membuatnya fixture paling menarik sekaligus muatan paling besar. Fixture hostile-path NFR-15 risikonya rendah karena sintetis menurut sifatnya; korpus NFR-28 yang berbahaya.
+
+Review diff tidak menangkapnya: `.aero` adalah JSON besar, dan yang dilihat reviewer adalah blob, bukan lirik.
+
+**Bentuk guard yang diminta.** Deteksi **positif** — fixture dibuktikan sintetis, bukan diasumsikan. Repo sudah punya presedennya di `scripts/check-dist-html.js` dan `scripts/dist-html-guard.js`: pemeriksa yang terikat ke lifecycle npm, dengan bagian murni yang dapat diuji unit.
+
+**Cakupan guard — tiga hal, jangan sampai lahir setengah.**
+
+1. **Kedua ekstensi yang di-unignore, bukan hanya `.aero`.** Baris 88 `.gitignore` juga meng-unignore `*.aerotpl`, dan FR-409 menjadikan `.aerotpl` format ekspor berdiri sendiri; tabel `template_media` berarti template nyata membawa referensi media milik gereja. Bobotnya di bawah lirik, tetapi implementer yang membaca entri ini tanpa kalimat ini akan membangun guard yang hanya memeriksa `*.aero`.
+2. **Artefak render dan media biner, terlepas dari path-nya.** Ini melipat temuan W1 audit siklus 2 SETUP-06. Pola ber-anchor `/cache/` dan `/media/` hanya menutup bentuk "isi data root ditumpahkan ke akar repo"; bentuk yang lebih wajar — menyalin direktorinya utuh sehingga menjadi `AeroWorship/cache/decks/…`, atau menaruhnya di `tmp/data/`, atau bundel relink FR-705 di `tests/integration/fixtures/relink-{a,b}/media/` — semuanya lolos, dan tidak ada pola ekstensi di `.gitignore` yang menyentuh `.webp`. Itu bukan cacat dua baris tersebut melainkan batas prinsip `.gitignore`: berkas apa pun bisa mendarat di lokasi apa pun, dan tidak ada pola berbasis-lokasi yang menutup itu tanpa menelan direktori sumber yang sah (`src/assets/media/` ada di pohon kerja hari ini). Pemeriksa staged-content menilai **apa** yang di-stage, bukan **di mana** — jadi ia menutup ini dengan mekanisme yang sama.
+3. **Tiga lubang yang `.gitignore` secara prinsip tidak bisa jaga**, dan yang satu pemeriksa tutup sekaligus: fixture tercemar (entri ini), `git add -f` yang melewati `.gitignore`, dan berkas yang terlanjur terlacak.
+
+Satu catatan mekanis untuk penulis guard: `fixtures/` yang kebetulan berada di dalam direktori yang diabaikan tidak akan pernah terjangkau pengecualian baris 87–88, karena git tidak menuruni direktori yang diabaikan. Auditor menilai bobotnya rendah — arah kegagalannya aman untuk privasi, dan §6.13 mengarahkan fixture ke `tests/` — tetapi pemeriksa staged-content melewati soal ini sepenuhnya, dan itu satu alasan lagi bentuk ini yang dipilih.
+
+**Mengapa SETUP-05 pemiliknya.** Item itu yang membuat kerangka `tests/{unit,integration,perf}`, yaitu tempat `fixtures/` pertama kali lahir. Menaruhnya di sana berarti guard ada **sebelum** fixture pertama ditulis, bukan sesudah — logika yang sama yang menempatkan SETUP-06 sebelum SETUP-04.
+
+**Alternatif yang ditolak.**
+- **Mempersempit pengecualian ke lokasi tertentu.** Tidak menyentuh masalahnya: yang berbahaya adalah isi berkas, bukan letaknya, dan mempersempit lokasi justru menghidupkan kegagalan senyap yang penanda nama direktori dipilih untuk menghindarinya.
+- **Mengandalkan review diff.** Sudah dijelaskan di atas mengapa tidak bekerja.
+- **Membuat item tersendiri.** Menunda guard sampai sesudah `fixtures/` terisi, yaitu sesudah risikonya terwujud.
+
+**Konsekuensi yang diterima.** Antara sekarang dan SETUP-05, satu-satunya penjaga terhadap dokumen ibadah masuk lewat `fixtures/` adalah kehati-hatian penulisnya. Jendelanya sempit — direktori `fixtures/` belum ada, dan tidak ada kode yang memproduksi `.aero` sampai FR-7xx — tetapi jendela itu **tidak boleh** dibiarkan terbuka melewati item yang menciptakan direktorinya.
+
+### ADR-0024 — `*.aerotpl` sudah mengabaikan sumber template bawaan FR-410; format sumbernya harus diputuskan sebelum berkasnya lahir
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-09 |
+| Status | Diterima (persyaratan yang dibawa) |
+| Terkait | SETUP-06, FR-409, FR-410, PRD §6.9, PRD §6.13, Appendix A |
+
+**Temuan.** `.gitignore:70` mengabaikan `*.aerotpl` di kedalaman berapa pun, dan pengecualian di baris 87–88 hanya berlaku di bawah direktori bernama `fixtures/`. FR-410 menuntut template bawaan hadir sejak first launch. Bila sumber ketiga template itu kelak berbentuk berkas `.aerotpl` di dalam repo — bentuk yang paling wajar diambil orang — **berkasnya sudah terabaikan hari ini**, tanpa satu pun tanda di `git status`. Build lokal tetap jalan karena berkasnya ada di disk; mesin lain dan CI kehilangan template bawaan.
+
+**Keputusan.** Item yang mengimplementasikan FR-410 wajib memutuskan format sumber template bawaan **sebelum** berkas pertamanya ditulis, dan memilih salah satu secara eksplisit:
+
+- **JSON seed di dalam migrasi** — menghindari masalahnya sepenuhnya, dan sejalan dengan Appendix A yang menyimpan template di tabel SQLite (`is_builtin`, `document TEXT`), bukan sebagai berkas.
+- **Berkas `.aerotpl` di repo** — sah, tetapi menuntut pengecualian ber-lokasi ditambahkan ke `.gitignore` **pada perubahan yang sama**, bukan sesudahnya.
+
+**Mengapa ini tidak diperbaiki di SETUP-06.** Tidak ada berkas yang perlu dijaga hari ini, dan menambahkan pengecualian untuk berkas yang belum diputuskan akan ada menghasilkan aturan yang tidak pernah teruji — alasan yang sama yang dipakai menolak `!.env.example` di item ini.
+
+**Peringatan dari tester: suite tidak akan menangkapmu, ia akan menahanmu.** `tests/unit/gitignore-guard.test.js` mengasersi bahwa `*.aerotpl` **diabaikan** — benar hari ini, dan itu memang perilaku yang diinginkan sekarang. Konsekuensinya: pada hari sumber template bawaan FR-410 masuk repo di luar direktori `fixtures/`, baris 70 menelannya diam-diam **dan suite tetap hijau**, karena ia mengasersi cacat itu sebagai perilaku yang benar. Jadi jangan mengandalkan `npm test` untuk memberi tahu; test itu harus **diubah pada perubahan yang sama** yang memutuskan format sumbernya.
+
+**Koreksi yang perlu tercatat.** Entri ini lahir dari penalaran `project-lead` yang **tidak berdiri**. Saya menolak menambahkan `/templates/` dengan alasan "pola direktori akan memblokir template bawaan yang harus masuk repo". Auditor memeriksanya: PRD §6.13 tidak memuat `templates/` di akar repo sama sekali, dan §6.9 menempatkan `templates/builtin/` di dalam data root `%APPDATA%\AeroWorship` — di luar repo. Jadi `/templates/` ber-anchor akar tidak akan menyentuh apa pun yang FR-410 kapalkan. Kesimpulannya kebetulan benar (`/templates/` memang tidak perlu ditambahkan), tetapi alasannya salah, dan alasan yang salah itu **menyembunyikan cacat yang aktif hari ini di baris 70** — yang justru isi entri ini. Dicatat apa adanya karena kesimpulan benar dari premis keliru adalah bentuk kegagalan yang paling sulit ditemukan lagi nanti.
