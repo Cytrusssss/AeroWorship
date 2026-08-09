@@ -26,7 +26,11 @@ body {
 </style>
 
 <style scoped>
-/* Dark by default (NFR-27): the Control Panel is used in a darkened booth. */
+/* Dark by default (NFR-27): the Control Panel is used in a darkened booth.
+
+   `min-height: 100vh` next to `padding` only fits the viewport because of the
+   global `box-sizing: border-box` in `src/shared/styles/base.css`; without it
+   this pair is 100vh + 4rem tall and the window scrolls. */
 .control-panel {
   background: #16181d;
   color: #e6e8ec;

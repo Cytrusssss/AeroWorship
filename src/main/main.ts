@@ -6,6 +6,9 @@
 
 import { createApp } from 'vue'
 
+// Before the component, so the global box model is emitted ahead of any rule
+// that might one day want to override it.
+import '../shared/styles/base.css'
 import App from './App.vue'
 
 createApp(App).mount('#app')
