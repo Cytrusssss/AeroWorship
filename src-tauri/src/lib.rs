@@ -55,12 +55,18 @@ compile_error!(
      (ADR-0019)."
 );
 
+pub mod db;
+
 /// Builds and runs the Tauri application.
 ///
 /// Kept separate from `main` so the binary stays a one-liner and the builder
 /// configuration is a normal library function.
 pub fn run() {
     tauri::Builder::default()
+        // The database is opened and brought up to date before the first window
+        // appears; failing here aborts start-up rather than letting the app come
+        // up with no storage behind it.
+        .setup(|app| db::init(app.handle()))
         .run(tauri::generate_context!())
         .expect("failed to start the AeroWorship application");
 }

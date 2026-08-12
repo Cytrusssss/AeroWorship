@@ -9,7 +9,27 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-# Intentionally empty. `serde`, `rusqlite` and friends are added by the item
-# that first needs them, so the crate's test cycle stays as cheap as ADR-0008
-# claims.
 [dependencies]
+# `bundled` compiles SQLite into the binary, so there is no system library to
+# detect and nothing for a church PC to be missing (PRD §6.12).
+#
+# FTS5 needs no feature flag of its own here, and that is worth stating because
+# the opposite is widely assumed: `rusqlite` 0.40 has no `fts5` feature at all
+# (asking for one is a resolver error), and `libsqlite3-sys`'s bundled amalgamation
+# is compiled with `-DSQLITE_ENABLE_FTS5`. Appendix A's `songs_fts` and
+# `verses_fts` are therefore available — but *because a flag is not involved*,
+# nothing here would fail to compile if that ever changed. It would fail when
+# `CREATE VIRTUAL TABLE … USING fts5` runs. Migration 001 executes exactly that,
+# so a broken build cannot get past `migrate()`.
+#
+# Default features are off on purpose: they pull in `cache` (and with it
+# `hashlink` — confirmed absent from Cargo.lock with the flag off). The other
+# default feature, `ffi-sqlite-wasm-rs`, is not weight saved on this target:
+# `rusqlite`'s own Cargo.toml gates its `sqlite-wasm-rs` dependency behind
+# `cfg(target_family = "wasm")`, so it is never pulled in on native
+# Windows/Linux/macOS builds regardless of this flag. `default-features =
+# false` is kept anyway for the `cache` saving, which is real; only the wasm
+# half of the old justification is dropped.
+# Statement caching is worth revisiting when FR-2xx measures its query paths;
+# until then it is weight in a 15 MB installer budget (NFR-16).
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }

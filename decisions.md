@@ -1023,3 +1023,112 @@ Satu catatan mekanis untuk penulis guard: `fixtures/` yang kebetulan berada di d
 **Peringatan dari tester: suite tidak akan menangkapmu, ia akan menahanmu.** `tests/unit/gitignore-guard.test.js` mengasersi bahwa `*.aerotpl` **diabaikan** — benar hari ini, dan itu memang perilaku yang diinginkan sekarang. Konsekuensinya: pada hari sumber template bawaan FR-410 masuk repo di luar direktori `fixtures/`, baris 70 menelannya diam-diam **dan suite tetap hijau**, karena ia mengasersi cacat itu sebagai perilaku yang benar. Jadi jangan mengandalkan `npm test` untuk memberi tahu; test itu harus **diubah pada perubahan yang sama** yang memutuskan format sumbernya.
 
 **Koreksi yang perlu tercatat.** Entri ini lahir dari penalaran `project-lead` yang **tidak berdiri**. Saya menolak menambahkan `/templates/` dengan alasan "pola direktori akan memblokir template bawaan yang harus masuk repo". Auditor memeriksanya: PRD §6.13 tidak memuat `templates/` di akar repo sama sekali, dan §6.9 menempatkan `templates/builtin/` di dalam data root `%APPDATA%\AeroWorship` — di luar repo. Jadi `/templates/` ber-anchor akar tidak akan menyentuh apa pun yang FR-410 kapalkan. Kesimpulannya kebetulan benar (`/templates/` memang tidak perlu ditambahkan), tetapi alasannya salah, dan alasan yang salah itu **menyembunyikan cacat yang aktif hari ini di baris 70** — yang justru isi entri ini. Dicatat apa adanya karena kesimpulan benar dari premis keliru adalah bentuk kegagalan yang paling sulit ditemukan lagi nanti.
+
+### ADR-0025 — Data root memakai nama produk, bukan identifier bundle
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-09 |
+| Status | Diterima |
+| Terkait | SETUP-04, ADR-0010, PRD §6.9, NFR-30 |
+
+**Keputusan.** Berkas data aplikasi hidup di `%APPDATA%\AeroWorship\`, bukan di `%APPDATA%\id.aeroworship.app\` yang dihasilkan `PathResolver::app_data_dir()` bawaan Tauri. Diputuskan pengguna.
+
+`%APPDATA%` tetap diresolve lewat API Tauri (`app.path().data_dir()`); yang menjadi konstanta hanya daun `"AeroWorship"`, dan itu nama produk dari PRD §6.9, bukan path yang dirakit tangan. Tidak ada string `%APPDATA%` maupun path absolut di kode.
+
+**Alasan.** NFR-30 menuntut satu data root yang dapat **ditemukan dan disalin pengguna**. Aplikasi ini dipakai relawan gereja, dan skenario yang paling mungkin — "backup dulu data gerejanya sebelum ganti komputer" — menuntut folder yang terbaca sebagai nama aplikasi. `id.aeroworship.app` benar secara konvensi dan buram bagi orang yang harus menemukannya.
+
+PRD §6.9 juga menuliskannya secara literal sebagai `{APP_DATA}/AeroWorship/`. Mengikuti Tauri berarti mengubah PRD; mengikuti PRD tidak menuntut apa pun kecuali entri ini.
+
+**Yang dikoreksi dari ADR-0010.** Catatan konsekuensi ADR-0010 menyatakan identifier bundle "ikut menentukan nama direktori data aplikasi". Itu benar untuk perilaku bawaan Tauri, dan tidak lagi benar untuk aplikasi ini. Identifier tetap `id.aeroworship.app` dan tetap menentukan hal-hal lain yang disebut ADR-0010 — ia hanya tidak lagi menentukan lokasi data.
+
+**Konsekuensi yang diterima.** Kita keluar dari jalur bawaan Tauri, sehingga setiap plugin atau kode masa depan yang memanggil `app_data_dir()` akan menunjuk direktori **yang berbeda** dari milik kita, dan keduanya bisa hidup berdampingan tanpa gejala. Itu jebakan nyata: gejalanya adalah "datanya hilang" padahal ia ada di folder sebelah. Penjaganya adalah satu jalur resolusi path di `src-tauri/src/db.rs` — jangan pernah memanggil `app_data_dir()` langsung di tempat lain.
+
+### ADR-0026 — `default_arrangement_id` dijaga pada INSERT, bukan hanya UPDATE
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-09 |
+| Status | Diterima |
+| Terkait | SETUP-04, PRD Appendix A, PRD §6.6 |
+
+**Keputusan.** PRD Appendix A **diperbaiki** — atas keputusan pengguna, sesuai H4 — dengan menambahkan trigger `BEFORE INSERT ON songs` berkondisi identik dengan `trg_songs_default_arrangement_fk` yang sudah ada. Skema mengikutinya.
+
+Sumbernya yang diperbaiki, bukan hanya gejalanya, supaya siapa pun yang membaca Appendix A nanti tidak menemukan celah yang sama dan menyalinnya ulang.
+
+**Celahnya, terbukti empiris.** `trg_songs_default_arrangement_fk` hanya `BEFORE UPDATE OF default_arrangement_id`. Diukur implementer SETUP-04 pada database sungguhan:
+
+```
+UPDATE song-b -> arr-a (milik lagu lain): ditolak, "default_arrangement_id must belong to this song"
+INSERT song-c  -> arr-a (milik lagu lain): DITERIMA, 1 row
+```
+
+Jadi sebuah lagu dapat lahir dengan `default_arrangement_id` menunjuk arrangement milik lagu lain, dan tidak ada apa pun di database yang menahannya. Referensi silang itu tidak dapat ditangkap `REFERENCES` biasa karena batasannya bukan "baris itu ada" melainkan "baris itu milik lagu ini" — persis alasan trigger dipakai di sini sejak awal.
+
+**Konsekuensi yang perlu dipahami, bukan sekadar diterima.** Setelah trigger ini ada, `INSERT INTO songs` dengan `default_arrangement_id` non-NULL akan **selalu** ditolak. Itu bukan efek samping yang disayangkan — itu satu-satunya urutan yang mungkin: `song_arrangements.song_id` mereferensikan `songs(id)`, jadi arrangement milik lagu baru tidak dapat ada sebelum lagunya ada. Alur yang sah selalu tiga langkah: sisipkan lagu dengan `default_arrangement_id` NULL, buat arrangement-nya, lalu UPDATE.
+
+Trigger ini menjadikan urutan itu **ditegakkan skema**, bukan konvensi yang harus diingat penulis service.
+
+**Alternatif yang ditolak.**
+- **Menutupnya di lapisan service FR-2xx.** Database berhenti menjaga dirinya sendiri, dan setiap jalur yang melewati service — impor, migrasi, perbaikan manual lewat `sqlite3` — dapat menulis data tidak konsisten. Bentuk konvensi tanpa penegakan yang sudah ditolak di ADR-0013, ADR-0016, dan ADR-0020.
+- **Menambah trigger tanpa memperbaiki PRD.** Meninggalkan spesifikasi yang tidak cocok dengan skema sesungguhnya, di repo yang sudah tujuh siklus menghukum dokumen yang mengklaim berbeda dari kodenya.
+
+### ADR-0027 — Kegagalan startup database ditunda, bukan diabaikan: ia tidak punya permukaan diagnostik dan itu bukan pekerjaan item skema
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-12 |
+| Status | Diterima (ditunda dengan pemicu) |
+| Terkait | SETUP-04 (auditor W1), NFR-30, PRD §6.9 `logs/`, item logging |
+
+**Keputusan.** Warning W1 auditor SETUP-04 **tidak diperbaiki di SETUP-04**, dan alasannya bukan biaya melainkan cakupan: memperbaikinya berarti memperkenalkan permukaan pelaporan galat — dialog, log, atau keduanya — yang merupakan item tersendiri dan bukan bagian dari "skema SQLite + migrasi". H5 melarang menariknya ke sini. Ditunda dengan pemicu eksplisit di bawah, bukan dengan harapan seseorang mengingatnya.
+
+**Cacatnya.** `db::init` yang gagal mengembalikan `Err` dari `.setup()`, yang menjalar ke `.expect(...)` di `run()` (`src-tauri/src/lib.rs:71`) dan mem-panic. Pada build rilis `windows_subsystem = "windows"` (`src-tauri/src/main.rs:4`) melepas console, sehingga stderr tidak terikat ke apa pun yang dapat dilihat pengguna. Belum ada item logging — `logs/` di PRD §6.9 belum dibangun.
+
+Hasilnya: **aplikasi tidak menampilkan apa pun.** Tidak ada jendela, tidak ada dialog, tidak ada baris log. Prosesnya sekadar menghilang.
+
+**Mengapa ini bukan sekadar kekasaran.** Jalur yang memicunya justru jalur yang PRD sendiri dorong. NFR-30 menuntut data root yang dapat pengguna temukan, salin, dan pulihkan — dan penyalinan naif `aeroworship.db` tanpa `-wal`/`-shm` di tengah tulisan menghasilkan berkas yang gagal dibuka. Relawan gereja yang melakukan persis apa yang dokumentasi sarankan mendapat aplikasi yang tidak bisa dibuka dan nol petunjuk kenapa. Pemulihan yang gagal total tanpa jejak bukan pemulihan.
+
+Empat varian `DbError` seluruhnya bermuara ke sini, termasuk dua yang sengaja dirancang untuk **memberi tahu** pengguna: `FutureSchema` menulis kalimat "Update AeroWorship to open it — it has not been modified", dan `InconsistentVersion` menyebut kedua angka. Kalimat-kalimat itu ditulis untuk dibaca manusia dan hari ini tidak sampai ke manusia mana pun. Itulah bagian yang paling perlu dicatat: pekerjaannya sudah dilakukan di satu ujung dan menganggur karena ujung lain belum ada.
+
+**Batasnya jujur.** Ini murni ketersediaan. Nol kebocoran data, nol eksekusi kode, nol korupsi yang disebabkan kode ini — auditor menilainya Warning atas dasar itu dan penilaian itu diterima apa adanya.
+
+**Dibawa keluar.** Item pertama yang memperkenalkan logging **atau** pelaporan galat ke pengguna wajib membuat kegagalan `db::init` terlihat: minimal satu baris di `logs/`, dan lebih baik lagi dialog yang menampilkan `Display` dari `DbError` — yang sudah ditulis untuk itu. Sampai saat itu, satu-satunya cara mendiagnosis adalah menjalankan biner dari console.
+
+**Alternatif yang ditolak.**
+- **Menampilkan dialog seadanya sekarang.** Menempatkan keputusan bentuk pelaporan galat di item skema, tempat ia akan diambil tergesa dan diwarisi seluruh aplikasi.
+- **Membiarkan aplikasi tetap berjalan tanpa database.** Setiap fitur berikutnya harus menangani "tidak ada storage" sebagai keadaan sah selamanya, demi kasus yang seharusnya gagal keras.
+
+### ADR-0028 — Larangan mengedit migrasi yang sudah dikapalkan ditunda sampai ada yang benar-benar dikapalkan
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-12 |
+| Status | Diterima (ditunda dengan pemicu) |
+| Terkait | SETUP-04 (auditor S3), ADR-0026, item rilis pertama |
+
+**Keputusan.** Test checksum yang menolak perubahan isi migrasi yang sudah dikapalkan **tidak dibuat di SETUP-04**. Pemicunya: **item yang menghasilkan artefak rilis pertama untuk pengguna di luar mesin pengembangan.**
+
+**Alasannya adalah tanggal, bukan nilai.** Assertion `const _` sudah menjaga *urutan* versi saat kompilasi, tetapi nol hal menjaga *isi* `001_initial_schema.sql`. Menambahkan guard itu hari ini akan mengunci berkas yang siklus 2 baru saja amandemen dengan sah — dan pembenaran amandemen itu (ADR-0026) berdiri di atas premis "nol database di luar sana sudah menerapkan 001", yang diverifikasi empiris. Guard yang melarang persis tindakan yang baru saja benar akan menjadi guard yang orang pertama pelajari cara mem-bypass.
+
+**Yang dijaga guard itu nanti.** `migrate()` memfilter `version > current`, jadi database ber-`user_version = 1` yang memakai teks 001 versi lama akan diam-diam dianggap mutakhir. Nol error, nol peringatan, skema salah. Implementer menyatakan jalur ini sendiri alih-alih membulatkannya, dan menyebut jaminan yang menutupinya sebagai *"jaminan yang hanya berlaku hari ini, dan hari ini satu-satunya hari ia gratis."*
+
+**Kapan jendela itu tertutup.** Bukan saat kode di-commit, melainkan saat sebuah database menerapkan 001 di luar kendali kita. Verifikasi runtime coordinator sesudah siklus 3 menutupnya di mesin ini; rilis pertama menutupnya untuk semua orang. Sejak titik itu, mengedit 001 berhenti menjadi murah dan guard-nya berhenti menjadi opsional.
+
+### ADR-0029 — Isolasi database bersandar pada akun OS; nol enkripsi at-rest, dan itu keputusan, bukan kelalaian
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-12 |
+| Status | Diterima |
+| Terkait | SETUP-04 (auditor S4), PRD §6.9, NFR-30 |
+
+**Keputusan.** Database dan seluruh data root disimpan **tanpa enkripsi**, dilindungi semata oleh ACL yang `create_dir_all` warisi dari `%APPDATA%`. Dicatat supaya ini menjadi asumsi yang tertulis, bukan asumsi yang diam.
+
+**PRD tidak menuntut lebih, dan itu diperiksa bukan diasumsikan.** Auditor mencari `enkripsi|encrypt|at.rest|SQLCipher` di seluruh PRD: nol hasil. Jadi ini bukan requirement yang terlewat.
+
+**Batas sesungguhnya.** Isolasi `%APPDATA%\<user>\Roaming` hanya berlaku bila tiap operator memakai akun Windows sendiri. PC gereja yang memakai satu login bersama untuk semua relawan — konfigurasi yang lazim dan mungkin justru yang paling umum di sasaran produk ini — tidak mendapat proteksi apa pun dari lapisan ini. Siapa pun yang bisa masuk ke mesin itu bisa membaca lirik, isi ibadah, dan catatan khotbah.
+
+Bobotnya jujur: kandungan datanya bukan kredensial dan bukan data finansial, dan enkripsi at-rest yang kuncinya harus tersedia bagi aplikasi offline pada mesin yang sama memindahkan masalah alih-alih menyelesaikannya. Yang tidak dapat dibenarkan adalah **tidak menuliskannya**, karena keputusan diam tidak dapat ditinjau ulang saat asumsinya berubah.
+
+**Yang membatalkan keputusan ini.** Requirement mana pun yang menempatkan data pribadi jemaat — bukan sekadar isi ibadah — di dalam database yang sama.
