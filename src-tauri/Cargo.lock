@@ -13,8 +13,6 @@ name = "aeroworship"
 version = "0.1.0"
 dependencies = [
  "aeroworship-core",
- "serde",
- "serde_json",
  "tauri",
  "tauri-build",
 ]
@@ -24,6 +22,7 @@ name = "aeroworship-core"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "serde",
  "ts-rs",
 ]
 

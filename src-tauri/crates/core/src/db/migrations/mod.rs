@@ -36,39 +36,16 @@ use rusqlite::Connection;
 use super::connection;
 use super::error::DbError;
 
-// Why *this* type carries the TypeScript export (NFR-33) — and note the
-// comment is deliberately not a doc comment, because ts-rs copies doc comments
-// into the generated `.ts` and none of the following is any business of a
-// frontend reader.
-//
-// `Migration` is not a wire type and nothing in the frontend consumes it. It is
-// here because a generator has to be proven on a type that actually exists, and
-// this is the only public type in the tree whose TypeScript projection is
-// unambiguous: three fields, all primitives, no external types, no serde
-// attributes to interpret. The other candidate, `DbError`, is not `Serialize`,
-// and its `Sqlite` variant wraps a `rusqlite::Error` with no TypeScript
-// projection at all — exporting it would mean inventing a shape for the
-// application error contract, which is Appendix D's `AppError` and belongs to
-// the FR item that first needs one, not to the item that wires up the
-// generator.
-//
-// So `src/shared/bindings/Migration.ts` is evidence that the pipeline runs and
-// that the drift gate bites, not the first entry of the Appendix D catalogue.
-// When the first real wire type lands in `models/`, the honest move is to take
-// these two attributes off again and delete the generated file in the same
-// change: the mechanism will by then be carried by types that are genuinely
-// shared, and a stale proof left in `bindings/` reads like a contract.
-//
-// The derive is `cfg_attr(test, …)` because `ts-rs` is a dev-dependency, and
-// that in turn is possible because `#[ts(export)]` expands to a `#[test]`:
-// ts-rs cannot export at build time — its own documentation says procedural
-// macros are evaluated before the rest of compilation — so `cargo test
-// --workspace` is what writes the file, into the `TS_RS_EXPORT_DIR` that
-// `.cargo/config.toml` points at `src/shared/bindings/`.
+// This type used to carry the `ts_rs` export attributes, as the proof that the
+// Rust→TypeScript pipeline and its drift gate actually worked (ADR-0036). They
+// were removed here, and `src/shared/bindings/Migration.ts` deleted in the same
+// change, when the first genuine wire type landed — `models::Monitor` (FR-101).
+// `Migration` is internal to this crate, nothing in the frontend consumes it,
+// and a stale proof left in `bindings/` reads like a contract. The mechanism is
+// now carried by a type that is genuinely shared. Do not re-add them: this is
+// not the place to test the generator.
 /// One numbered schema change.
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export))]
 pub struct Migration {
     /// Version this migration brings the database to. Recorded in
     /// `schema_migrations.version` and in `PRAGMA user_version`.

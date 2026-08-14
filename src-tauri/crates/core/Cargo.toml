@@ -33,6 +33,12 @@ publish.workspace = true
 # Statement caching is worth revisiting when FR-2xx measures its query paths;
 # until then it is weight in a 15 MB installer budget (NFR-16).
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+# The wire types in `models/` are serialised across the IPC boundary, so they
+# have to derive `Serialize` here rather than being mirrored by a second set of
+# structs in the shell crate. This costs nothing against NFR-16: `tauri` already
+# depends on `serde` with `derive`, so the crates are in the graph and the
+# installer either way — the only new thing is that this crate names them too.
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 # The Rust→TypeScript generator behind NFR-33.
@@ -50,10 +56,13 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled"] 
 # lint time, never installer bytes. It does appear in `Cargo.lock`; that is
 # bookkeeping, not weight.
 #
-# `serde-compat` (a default feature) is kept on purpose. Nothing exported today
-# carries a serde attribute, so it currently does nothing — but the moment
-# `models/` gains `#[serde(rename_all = "camelCase")]`, turning it off would
-# make ts-rs emit `snake_case` field names for a wire type serialised as
-# `camelCase`, and the generated file would look perfectly plausible while
-# being wrong. The failure mode is silent, so the feature stays.
+# `serde-compat` (a default feature) is kept on purpose, and as of FR-101 that
+# is measured rather than predicted. `models::Monitor` carries
+# `#[serde(rename_all = "camelCase")]` because Appendix D says the wire shape is
+# camelCase. Regenerating with `default-features = false` was tried: the build
+# stays green, one file is still produced, and it declares `scale_factor` and
+# `is_primary` — snake_case field names for a type that goes over IPC as
+# `scaleFactor` and `isPrimary`. Nothing fails; `vue-tsc` would simply typecheck
+# the frontend against a contract the backend does not speak. The failure mode
+# is silent, so the feature stays.
 ts-rs = "12"

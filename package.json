@@ -14,6 +14,8 @@
     "test": "vitest run",
     "test:perf:shell": "cargo test --release --manifest-path src-tauri/Cargo.toml -p aeroworship --features tauri/custom-protocol",
     "test:perf:core": "cargo build --release --manifest-path src-tauri/Cargo.toml -p aeroworship-core",
+    "commands:check": "node scripts/check-command-inventory.js",
+    "prelint": "npm run commands:check",
     "lint": "eslint .",
     "postlint": "prettier --check .",
     "format": "prettier --write .",
@@ -23,6 +25,7 @@
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
     "vue": "^3.5.41"
   },
   "devDependencies": {

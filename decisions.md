@@ -517,6 +517,8 @@ Ia harus disertai dua langkah:
    `capabilities/*.json`. Berkas itu ter-gitignore (`/src-tauri/gen/`), jadi
    ia bukan artefak versioned dan tidak boleh dibaca apa adanya dari repo.
 
+**Koreksi terhadap ADR-0014, dari audit FR-101 (2026-08-14).** Daftar dua langkah di atas terbaca sebagai daftar **tertutup**, dan sejak perintah `#[tauri::command]` pertama mendarat ia tidak lagi lengkap: **langkah 2 secara struktural buta terhadap perintah app-defined.** Diverifikasi — `list_monitors` muncul **nol kali** di seluruh `src-tauri/gen/schemas/`, jadi diff dua berkas yang sama-sama tidak memuatnya akan selalu bersih, dan peninjau yang mengikuti langkah ini secara harfiah akan melaporkan permukaan IPC kosong. Langkah ketiga karena itu wajib: **baca isi `generate_handler![…]` di `src-tauri/src/lib.rs`** — itulah satu-satunya daftar otoritatif permukaan IPC aplikasi ini. `capabilities/*.json` tetap wajib dibaca, tetapi cakupannya harus dinamai: ia hanya mengikat perintah `plugin:` (termasuk seluruh `core:*` yang dipanggil lewat `@tauri-apps/api`). Langkah 1 diperiksa ulang pada audit itu dan tetap terpenuhi: nol kemunculan `__allow_command`/`runtime_authority_mut`/`add_capability` di seluruh kode.
+
 Langkah ini menjadi bagian dari checklist rilis, dan `project-lead`
 memasukkannya ke brief auditor pada setiap item yang menambah command Tauri.
 
@@ -747,6 +749,8 @@ adalah manifest kapabilitas, dan itu berarti setiap permission yang ditambahkan
 sejak sekarang harus diasumsikan dapat dipanggil oleh kode frontend mana pun
 yang berhasil dieksekusi di webview — termasuk kode yang masuk lewat XSS dari
 lirik atau template.
+
+**Koreksi terhadap ADR-0018, dari audit FR-101 (2026-08-14).** Premis pertama kalimat di atas kini **terbalik**, sementara kesimpulannya menjadi **lebih luas**. Manifest kapabilitas bukan "satu-satunya batas yang nyata": untuk perintah **app-defined** tidak ada batas sama sekali. Gerbang ACL di `tauri` 2.11.5 (`webview/mod.rs:1823-1827`) hanya menyala untuk perintah `plugin:`, origin remote, atau bila aplikasi punya manifest ACL sendiri — dan repo ini tidak punya ([ADR-0039](decisions.md#adr-0039)). Jadi yang benar dibaca: **setiap perintah yang ditambahkan** — bukan sekadar setiap permission — harus diasumsikan dapat dipanggil oleh kode frontend mana pun yang berhasil dieksekusi di webview, termasuk kode yang masuk lewat XSS dari lirik atau template. Koreksi ini diletakkan di sini, bukan hanya di ADR-0039, sebab inilah satu-satunya pernyataan kategoris di repo dan ia berdiri tepat di ADR yang membahas ancaman itu.
 
 **Alternatif yang ditolak.**
 - Menjalankan siklus tersendiri untuk SETUP-02 hanya demi perpindahan ini —
@@ -1293,3 +1297,71 @@ Diterima, karena keadaan akhir yang diinginkan justru itu — kedua berkas berub
 **`Migration` bukan tipe kawat, dan tidak boleh menjadi tipe kawat.** Ia internal crate `core`. Kehadirannya di `src/shared/bindings/` adalah artefak bukti, bukan pernyataan bahwa frontend boleh memakainya. Komentar di atas struct-nya memuat instruksi pembongkarannya: **saat tipe kawat pertama mendarat di `models/`, kedua atribut `cfg_attr` dilepas dan `Migration.ts` dihapus dalam perubahan yang sama.**
 
 **Yang membatalkan keputusan ini.** Tipe kawat pertama itu sendiri. Sejak ia ada, mempertahankan `Migration` di direktori binding berhenti menjadi bukti dan mulai menjadi kebisingan yang menyamarkan kontrak sungguhan.
+
+### ADR-0037 — Identitas monitor dibangun dari nama perangkat GDI, bertag skema; kunci yang benar-benar stabil ada di OS tetapi tidak di permukaan Tauri
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-14 |
+| Status | Diterima |
+| Terkait | FR-101, FR-103, PRD Appendix D |
+
+**Keputusan.** `id = "gdi:" + <nama perangkat GDI>` (di Windows `\\.\DISPLAY1`), dengan fallback `"pos:{x},{y}"` bila OS tidak memberi nama.
+
+**Mengapa alasannya negatif, bukan positif.** Tauri 2.11.5 memberi lima hal tentang sebuah monitor: `name`, `size`, `position`, `work_area`, `scale_factor`. **Empat di antaranya adalah pengukuran atas setelan display saat ini** — ukuran berubah saat resolusi diubah, `scale_factor` saat slider penskalaan digeser, posisi saat display disusun ulang. Ketiganya persis operasi yang penetapan FR-103 **harus selamat** melewatinya. Jadi tak satu pun boleh masuk ke dalam id, dan yang tersisa hanya `name`. Ini bukan pilihan terbaik dari beberapa yang bagus; ini satu-satunya yang tidak langsung salah.
+
+**Bukti bahwa Windows sendiri tidak memakai nama slot sebagai kunci.** `HKLM\SYSTEM\CurrentControlSet\Enum\DISPLAY` di mesin pengembang mencatat **tujuh** monitor yang pernah terpasang, seluruhnya dikunci oleh **kode EDID pabrikan+produk** — `AUO5C2D`, `HPN36A6`, `LEN63EB`, dan seterusnya — **tidak pernah** oleh `\\.\DISPLAYn`. Itu bukti terkuat yang dapat diambil tanpa mencabut kabel, dan ia mengatakan terus terang bahwa keputusan ini memakai kunci yang lebih lemah daripada yang OS pakai sendiri.
+
+**Di mana ia tidak stabil — dinamai, bukan disamarkan.**
+
+1. **Replug ke port berbeda, atau perangkat berbeda ke port yang sama.** `\\.\DISPLAYn` adalah **slot**, bukan monitor. Cabut proyektor, colok proyektor lain ke port yang sama, dan penetapan tersimpan menunjuk perangkat keras yang berbeda **tanpa gejala apa pun**. Ini kegagalan paling mungkin di gereja sungguhan.
+2. **Dua monitor identik** hanya dibedakan oleh slot; menukar kabelnya menukar id-nya.
+3. **Jalur fallback `pos:`** tidak selamat dari penyusunan ulang — karena itu ia bertag skema berbeda. Di Windows cabang ini praktis tak terjangkau (`name` hanya `None` bila `GetMonitorInfoW` gagal atas handle yang baru saja dihasilkan `EnumDisplayMonitors`).
+
+**Yang stabil:** perubahan resolusi, perubahan DPI/penskalaan, penyusunan ulang display, dan restart dengan topologi sama.
+
+**Mengapa tag skema, dan mengapa ia bukan hiasan.** Kunci yang benar-benar stabil **ada** di level OS — device interface path ber-EDID, atau `QueryDisplayConfig` — hanya saja tidak ada di permukaan API Tauri; menjangkaunya menuntut FFI Win32 dan dependency `windows`, keputusan tersendiri yang bukan milik FR-101. Bila kelak diambil, setiap kunci yang sudah tertulis ke database gereja harus **dapat dikenali sebagai skema lama supaya dibuang** — bukan diam-diam dicocokkan ke display yang salah. Tag itu yang membuat migrasi kelak mungkin dilakukan dengan jujur.
+
+**Yang membatalkan keputusan ini.** Laporan pertama bahwa penetapan display hilang atau tertukar sesudah kabel dipindah — atau item yang memang membutuhkan identitas berbasis EDID, yang menjadikan FFI Win32 berbayar.
+
+### ADR-0038 — `list_monitors` mengembalikan `Vec<Monitor>` telanjang, menyimpang dari Appendix D; `AppError` ditunda karena bentuknya belum dapat ditepati
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-14 |
+| Status | Diterima |
+| Terkait | FR-101, PRD Appendix D, [ADR-0036](decisions.md#adr-0036) |
+
+**Keputusan.** Perintah pertama repo ini **tidak** mengembalikan `Result<T, AppError>`, meskipun Appendix D menyatakan setiap perintah melakukannya.
+
+**Alasan pertama, terukur.** Di `tauri` 2.11.5 (`src/app.rs:888`) setiap arm yang terjangkau dari `AppHandle` mengembalikan `Ok`; sisanya `unreachable!()`. Cabang `Err` untuk enumerasi monitor adalah **kode mati**. Ia diresolusikan menjadi "nol display" alih-alih panik — dan nol display toh state yang wajib dirender ([FR-106](docs/PRD.md)).
+
+**Alasan kedua — DICABUT oleh audit FR-101, dan koreksinya penting bagi item `AppError`.** Versi pertama ADR ini menyatakan `detail?: string` Appendix D tidak dapat ditepati sebab `ts-rs` akan memancarkan `detail: string | null`, sehingga PRD atau kode harus mengalah. **Salah.** `ts-rs` 12.0.1 menyediakan `#[ts(optional)]` yang justru mengubah `Option<T>` menjadi `t?: T` (`ts-rs-macros-12.0.1/src/optional.rs:9-11,79-90`), menghasilkan persis bentuk Appendix D; dan jalur kedua sudah aktif — dengan `serde-compat` menyala, `#[serde(skip_serializing_if)]` + `#[serde(default)]` menghasilkan field opsional lewat `attr.maybe_omitted && attr.has_default`. **Tidak ada yang perlu mengalah: bentuk PRD dapat ditepati hari ini dengan satu atribut.** Penundaan tetap sah, tetapi **hanya** karena alasan pertama. Item yang melahirkan `AppError` tidak mewarisi dilema apa pun — ia hanya perlu memasang atribut itu. Paragraf berikut dipertahankan sebagai catatan atas apa yang keliru saya tulis: `AppError` di Appendix D bertuliskan `detail?: string` — **opsional**. `ts-rs` akan memancarkan `detail: string | null` tanpa `#[ts(optional)]`. Melahirkan tipe kawat pertama yang bentuknya **tidak cocok dengan PRD** adalah harga yang tidak boleh dibayar diam-diam, dan memilih di antara keduanya adalah keputusan pengguna, bukan keputusan implementer. Menunda lebih jujur daripada menebak.
+
+**Konsekuensi yang harus dibaca terang-terangan.** Appendix D **belum ditepati** untuk perintah pertama ini. Tanda tangan `list_monitors` adalah yang **pertama harus berubah** saat `AppError` mendarat, dan item yang melahirkan `AppError` wajib memutuskan bentuk `detail` secara eksplisit — termasuk apakah PRD atau kode yang mengalah.
+
+**Yang membatalkan keputusan ini.** Perintah pertama yang benar-benar dapat gagal karena sebab yang perlu disampaikan ke pengguna.
+
+### ADR-0039 — Perintah Tauri app-defined tidak ter-ACL; meninjau `capabilities/*.json` tidak akan pernah menampilkannya
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-14 |
+| Status | Diterima — dicatat sebagai fakta lingkungan, bukan sebagai pilihan |
+| Terkait | FR-101, NFR-14, [ADR-0014](decisions.md#adr-0014) |
+
+**Fakta.** Di `tauri` 2.11.5 (`webview/mod.rs:1820`) gerbang ACL hanya menyala untuk perintah `plugin:`, untuk origin remote, atau bila aplikasi punya manifest ACL-nya sendiri. `tauri-build` 2.6.3 (`acl.rs:265`) hanya membuat manifest itu dari `Attributes::app_manifest(...).commands(...)` atau dari direktori `src-tauri/permissions/`. Repo ini punya `build.rs` polos dan tidak punya direktori itu.
+
+**Diverifikasi coordinator pada artefak, bukan disimpulkan dari dokumentasi:** `src-tauri/gen/schemas/acl-manifests.json` **tidak memuat `__app-acl__`**, `src-tauri/permissions/` tidak ada, dan `list_monitors` tidak muncul di `capabilities/*.json` mana pun.
+
+**Mengapa ini dicatat.** Setiap perintah baru **langsung terjangkau dari webview** begitu ia masuk `generate_handler!`, tanpa meninggalkan jejak apa pun di berkas kapabilitas. Konsekuensinya untuk peninjauan: **membaca `capabilities/*.json` bukan cara mengetahui permukaan IPC aplikasi ini** — `generate_handler!` di `src-tauri/src/lib.rs` adalah satu-satunya daftar yang benar. Auditor mana pun yang mengandalkan manifest akan melaporkan permukaan yang lebih kecil daripada yang sesungguhnya ada.
+
+**Mengapa tidak diubah sekarang.** Menyalakan manifest ACL app-defined mengubah model perizinan seluruh aplikasi dan menyentuh setiap perintah masa depan; itu keputusan arsitektur, bukan pekerjaan sampingan item enumerasi display. Yang tidak dapat dibenarkan adalah **tidak menuliskannya**, sebab asumsi diam bahwa "kapabilitas mendaftar semuanya" adalah asumsi yang salah dan tampak benar.
+
+**Ditutup sebagian pada siklus 3 FR-101 — oleh artefak, bukan oleh gerbang.** `src-tauri/commands.inventory.md` kini mendaftar setiap perintah yang terjangkau webview, dan `scripts/command-inventory-guard.js` (dipasang di `prelint`) merah kecuali **tiga** himpunan menamai hal yang sama: definisi `#[tauri::command]` di seluruh `src-tauri/src/`, registrasi `generate_handler!`, dan entri inventaris. Himpunan ketiga bukan redundansi: perbandingan dua-sisi tetap **hijau** untuk arah yang berbahaya, sebab perintah baru ditambahkan ke definisi dan handler dalam commit yang sama sehingga keduanya sepakat justru karena diedit bersamaan. Yang ditambahkan inventaris bukan informasi melainkan **kewajiban menuliskannya** — prosa yang harus ditulis manusia dan muncul di diff. Ini juga jawaban atas [ADR-0014](decisions.md#adr-0014): peninjauan NFR-14 kini punya satu berkas yang benar untuk dibaca.
+
+**Kondisi pembalik, yang wajib diketahui sebelum ada yang mencoba mengerasi ini.** Membuat `src-tauri/permissions/` atau memakai `Attributes::app_manifest(...)` membuat `has_app_acl_manifest` menjadi `true`, dan sejak momen itu **setiap** perintah yang tidak dinamai di sebuah capability ditolak dengan `"Command {} not allowed by ACL"`. Jadi tindakan pengerasan yang tampak paling jelas benar akan **mematikan seluruh IPC aplikasi** sampai setiap perintah didaftarkan. Ditulis di `src-tauri/src/commands/mod.rs` supaya orang yang hendak melakukannya membacanya lebih dulu.
+
+**Yang tetap terbuka: pelingkupan per-window.** `capabilities/main-window.json` berbunyi `"windows": ["main"]`, tetapi pembatasan itu hanya mengikat perintah `plugin:`. Perintah app-defined tidak punya pelingkupan per-window sama sekali, sehingga jendela output FR-102/FR-105 akan dapat memanggil setiap perintah begitu ia ada. Hari ini tak dapat dieksploitasi — bundel output terbukti nol `__TAURI_INTERNALS__` — tetapi PRD §6.3 menyandarkan isolasi itu pada **aturan impor**, dan aturan impor tidak menghalangi kode yang masuk lewat XSS lirik atau template. Menutupnya menuntut keputusan arsitektur dan menjadi persyaratan yang dibawa FR-102/FR-105.
+
+**Yang membatalkan keputusan ini.** Perintah pertama yang menyentuh berkas pengguna, jaringan, atau kredensial — di situ "terjangkau tanpa jejak" berhenti menjadi catatan dan mulai menjadi permukaan serangan.

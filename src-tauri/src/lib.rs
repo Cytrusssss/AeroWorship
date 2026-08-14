@@ -55,6 +55,7 @@ compile_error!(
      (ADR-0019)."
 );
 
+pub mod commands;
 pub mod db;
 
 /// Builds and runs the Tauri application.
@@ -67,6 +68,10 @@ pub fn run() {
         // appears; failing here aborts start-up rather than letting the app come
         // up with no storage behind it.
         .setup(|app| db::init(app.handle()))
+        // Every command in `commands/` has to be named here as well as defined;
+        // one that is defined but not registered compiles cleanly and fails only
+        // when the frontend invokes it.
+        .invoke_handler(tauri::generate_handler![commands::display::list_monitors])
         .run(tauri::generate_context!())
         .expect("failed to start the AeroWorship application");
 }
