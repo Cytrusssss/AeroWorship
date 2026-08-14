@@ -179,7 +179,20 @@ async function main() {
         committed.get(name) ?? '',
       )
       console.error(`bindings guard: src/shared/bindings/${name} is out of date.`)
-      if (difference) {
+      if (difference && difference.generated === null && difference.committed === null) {
+        // Both sides `null` means every line matched once trailing CRs were
+        // stripped, yet the bytes differ — the two agree line for line and
+        // disagree only on how the lines end (see `describeFirstDifference`).
+        // There is no line to quote, and the `first difference at line N`
+        // branch below would name a line past the end of both files and print
+        // `(no such line)` twice, describing nothing that exists.
+        console.error(
+          '  the two differ only in line endings — every line is identical once a ' +
+            'trailing CR is stripped. Still drift (this guard compares bytes), but the ' +
+            'cause is a tool that rewrote the file, not a Rust type that changed; ' +
+            '.gitattributes pins this tree to LF.',
+        )
+      } else if (difference) {
         console.error(`  first difference at line ${difference.line}:`)
         console.error(`    generated now: ${formatLine(difference.generated)}`)
         console.error(`    committed:     ${formatLine(difference.committed)}`)

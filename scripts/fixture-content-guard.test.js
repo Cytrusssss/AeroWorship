@@ -122,12 +122,16 @@ describe('parseLsFilesEntry / isGitlinkMode / gitlinkVerdict', () => {
       parseLsFilesEntry(
         `100644 ${'a'.repeat(40)} 0\ttests/integration/fixtures/sample.aero`,
       ),
-    ).toEqual({ mode: '100644', path: 'tests/integration/fixtures/sample.aero' })
+    ).toEqual({
+      mode: '100644',
+      stage: '0',
+      path: 'tests/integration/fixtures/sample.aero',
+    })
   })
 
   it('parses a gitlink record and identifies it as one', () => {
     const entry = parseLsFilesEntry(`160000 ${'b'.repeat(40)} 0\tfixtures/church-repo`)
-    expect(entry).toEqual({ mode: '160000', path: 'fixtures/church-repo' })
+    expect(entry).toEqual({ mode: '160000', stage: '0', path: 'fixtures/church-repo' })
     expect(isGitlinkMode(/** @type {{mode: string}} */ (entry).mode)).toBe(true)
   })
 
@@ -139,7 +143,7 @@ describe('parseLsFilesEntry / isGitlinkMode / gitlinkVerdict', () => {
 
   it('preserves a path containing a raw newline verbatim (NUL is the record separator, not \\n)', () => {
     const entry = parseLsFilesEntry(`100644 ${'a'.repeat(40)} 0\tweird\npath.aero`)
-    expect(entry).toEqual({ mode: '100644', path: 'weird\npath.aero' })
+    expect(entry).toEqual({ mode: '100644', stage: '0', path: 'weird\npath.aero' })
   })
 
   it('returns null for a record that does not match the expected shape', () => {
@@ -268,7 +272,13 @@ describe('buildBatchRequest / parseCatFileBatch — the git wire format', () => 
    */
   function buildBatchBuffer(entries) {
     const chunks = entries.map(({ key, content }) => {
-      if (content === null) return Buffer.from(`:${key} missing\n`, 'ascii')
+      // git echoes the query line back **verbatim** before ` missing`, so the
+      // echo carries whatever prefix `buildBatchRequest` wrote — `:0:`, the
+      // explicit stage-0 form (see `BATCH_SPEC_PREFIX`). Hard-coded rather
+      // than derived from the production function on purpose: this helper is
+      // the model of git's side of the wire, and a model that borrowed the
+      // implementation's own string would agree with it by construction.
+      if (content === null) return Buffer.from(`:0:${key} missing\n`, 'ascii')
       const fakeSha = 'a'.repeat(40)
       const header = Buffer.from(`${fakeSha} blob ${content.length}\n`, 'ascii')
       return Buffer.concat([header, content, Buffer.from('\n', 'ascii')])
@@ -309,9 +319,87 @@ describe('buildBatchRequest / parseCatFileBatch — the git wire format', () => 
     )
   })
 
-  it('throws when a header line does not parse', () => {
+  // A response line that is neither an object header nor this key's `missing`
+  // echo used to throw here, which cost the repository its verdict on *every
+  // other* path (the caller returns 1 before `identifyCandidates` runs once).
+  // It now yields `{ status: 'unparsed', header }` instead. That replacement is
+  // only sound if the guarantee the throw provided survives: the odd path must
+  // still be reported and must still fail the run. `toEqual` on the returned
+  // entry alone would drop that guarantee silently, so the three cases below
+  // assert the whole chain — the entry itself, that it reaches `unreadable`,
+  // and that `summariseRun` exits 1 on it — plus the claim that motivated not
+  // throwing at all (`offset` still points at the next entry).
+  it('yields an `unparsed` entry, not a throw, when a header line does not parse', () => {
     const buffer = Buffer.from('not a valid header\n', 'ascii')
-    expect(() => parseCatFileBatch(buffer, ['x'])).toThrow(/did not parse/)
+    const result = parseCatFileBatch(buffer, ['x'])
+    expect(result.get('x')).toEqual({ status: 'unparsed', header: 'not a valid header' })
+  })
+
+  it('keeps judging every remaining key after an unparsed line — that is the whole reason it no longer throws', () => {
+    // The unparsed line is one entry on the wire (`--batch` answers a query
+    // line with either a header plus content, or a single line), so `offset`
+    // must already sit at the next entry. If it drifted, `b.aero`'s content
+    // would come back wrong or the parse would throw here instead.
+    const buffer = Buffer.concat([
+      Buffer.from('this line is not a header at all\n', 'ascii'),
+      buildBatchBuffer([
+        { key: 'b.aero', content: Buffer.from('{"schema_version":1}', 'utf8') },
+        { key: 'c.png', content: null },
+      ]),
+    ])
+    const result = parseCatFileBatch(buffer, ['a.weird', 'b.aero', 'c.png'])
+    expect(result.get('a.weird')).toEqual({
+      status: 'unparsed',
+      header: 'this line is not a header at all',
+    })
+    expect(result.get('b.aero')).toEqual({
+      status: 'ok',
+      content: Buffer.from('{"schema_version":1}', 'utf8'),
+    })
+    expect(result.get('c.png')).toEqual({ status: 'missing' })
+  })
+
+  it('an unparsed entry still reaches `unreadable` and still fails the run — the guarantee the removed throw carried', () => {
+    const buffer = Buffer.from('not a valid header\n', 'ascii')
+    const contentByPath = parseCatFileBatch(buffer, [
+      'tests/integration/fixtures/odd.bin',
+    ])
+
+    // Not a candidate: there are no bytes to sniff, so claiming it is media
+    // would be an overclaim (`identifyCandidates`'s own doc). But it must not
+    // be silent either — `unreadable` is what says "unverified, not clean".
+    const { candidates, unreadable } = identifyCandidates(
+      ['tests/integration/fixtures/odd.bin'],
+      contentByPath,
+    )
+    expect(candidates).toEqual([])
+    expect(unreadable).toEqual(['tests/integration/fixtures/odd.bin'])
+
+    // …and `unreadable` alone, with no violations at all, is exit 1.
+    const summary = summariseRun({ candidateVerdicts: [], unreadable })
+    expect(summary.exitCode).toBe(1)
+    expect(summary.unreadableCount).toBe(1)
+    expect(summary.violationCount).toBe(0)
+  })
+
+  it('still throws on framing damage that genuinely desynchronises the stream', () => {
+    // The line above the `unparsed` branch: a declared size the response
+    // cannot satisfy means `offset` is no longer trustworthy for any later
+    // key, so continuing would attribute the wrong bytes to the wrong path.
+    // That distinction is what makes the `unparsed` branch a narrowing rather
+    // than a softening, so it is asserted right next to it.
+    const truncated = Buffer.from(`${'a'.repeat(40)} blob 99\nonly-a-few\n`, 'ascii')
+    expect(() => parseCatFileBatch(truncated, ['x'])).toThrow(
+      /shorter than the declared size/,
+    )
+
+    const noTrailingNewline = Buffer.concat([
+      Buffer.from(`${'a'.repeat(40)} blob 2\nab`, 'ascii'),
+      Buffer.from('NOT-A-NEWLINE', 'ascii'),
+    ])
+    expect(() => parseCatFileBatch(noTrailingNewline, ['x'])).toThrow(
+      /missing the trailing newline/,
+    )
   })
 
   it('throws when the stream ends before a header is found', () => {
@@ -320,14 +408,19 @@ describe('buildBatchRequest / parseCatFileBatch — the git wire format', () => 
   })
 
   it('buildBatchRequest is the exact inverse assumption parseCatFileBatch relies on', () => {
-    expect(buildBatchRequest(['a.aero', 'b/c.aerotpl'])).toBe(':a.aero\n:b/c.aerotpl\n')
+    expect(buildBatchRequest(['a.aero', 'b/c.aerotpl'])).toBe(
+      ':0:a.aero\n:0:b/c.aerotpl\n',
+    )
     expect(buildBatchRequest([])).toBe('')
   })
 
   it('buildBatchRequest throws rather than silently corrupting the request for a path carrying \\n or \\r', () => {
     // Regression coverage for the C1 correlation break: a path like this
-    // would otherwise split `:${path}\n` into two stdin lines and desync
-    // every entry requested after it. This is the belt-and-suspenders check
+    // would otherwise split the one line written for it — `` `:${path}\n` ``
+    // at the time of that break, `` `:0:${path}\n` `` since siklus 6 spelled
+    // the stage digit out (`BATCH_SPEC_PREFIX`) — into two stdin lines and
+    // desync every entry requested after it, whichever prefix is in front.
+    // This is the belt-and-suspenders check
     // — `check-fixture-content.js` is expected to have already routed such a
     // path to `classifyIndexedPaths`'s `unsafe` bucket and never call this
     // function with it at all; see `check-fixture-content.e2e.test.js` /
@@ -589,8 +682,6 @@ describe('evaluateCandidate', () => {
 describe('summariseRun', () => {
   it('is clean (exit 0) with zero candidates and reports how many were checked', () => {
     const summary = summariseRun({
-      indexedCount: 10,
-      allowlistedCount: 1,
       candidateVerdicts: [],
       unreadable: [],
     })
@@ -604,8 +695,6 @@ describe('summariseRun', () => {
 
   it('is clean (exit 0) when every candidate passed', () => {
     const summary = summariseRun({
-      indexedCount: 10,
-      allowlistedCount: 0,
       candidateVerdicts: [{ path: 'a.aero', ok: true }],
       unreadable: [],
     })
@@ -615,8 +704,6 @@ describe('summariseRun', () => {
 
   it('fails on any violation, regardless of how many candidates passed', () => {
     const summary = summariseRun({
-      indexedCount: 10,
-      allowlistedCount: 0,
       candidateVerdicts: [
         { path: 'a.aero', ok: true },
         { path: 'b.aero', ok: false, reason: 'no manifest' },
@@ -629,8 +716,6 @@ describe('summariseRun', () => {
 
   it('fails on an unreadable candidate even when every checked verdict passed', () => {
     const summary = summariseRun({
-      indexedCount: 10,
-      allowlistedCount: 0,
       candidateVerdicts: [{ path: 'a.aero', ok: true }],
       unreadable: ['b.aero'],
     })

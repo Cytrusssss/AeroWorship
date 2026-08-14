@@ -12,15 +12,15 @@
  *   - `parseLsFilesEntry` against index-mode and stage shapes the
  *     implementer's own cases do not exercise: `100755` (executable) and
  *     `120000` (symlink) full parses (not just `isGitlinkMode`), a path
- *     carrying an embedded tab or space, and — the case the coordinator brief
- *     explicitly asked to be verified rather than assumed — the three-stage
- *     record shape `git ls-files -z -s` emits for an unresolved merge
- *     conflict (stage 1/2/3, no stage 0). The implementer states this shape
- *     is not specially handled; this file pins down what the existing code
- *     actually does with it (a duplicate-path listing that
- *     `identifyCandidates` still fails closed on when the path's content
- *     cannot be confirmed at stage 0 — see the `identifyCandidates` block
- *     below), rather than trusting that statement.
+ *     carrying an embedded tab or space, and the three-stage record shape
+ *     `git ls-files -z -s` emits for an unresolved merge conflict (stage
+ *     1/2/3, no stage 0). Siklus 2 recorded that shape as *not* specially
+ *     handled and pinned what the code then did with it — a duplicate-path
+ *     listing that failed closed as unreadable. Siklus 4 changed that
+ *     deliberately: the parser now returns the stage digit, and
+ *     `check-fixture-content.js` splits unmerged entries out before the batch
+ *     request, judging them by name via `unmergedPathVerdicts`. These blocks
+ *     are updated to the new contract rather than left asserting the old one.
  *   - `breaksBatchLineProtocol`'s negative space: control bytes the doc
  *     comment says do *not* need screening, confirmed one at a time so a
  *     future edit that narrows or widens the byte set is a visible diff.
@@ -41,6 +41,7 @@ import {
   identifyCandidates,
   isAllowlisted,
   isGitlinkMode,
+  isUnmergedStage,
   parseLsFilesEntry,
   summariseRun,
 } from './fixture-content-guard.js'
@@ -49,7 +50,11 @@ describe('parseLsFilesEntry — mode variety', () => {
   it('parses an executable blob (100755)', () => {
     expect(
       parseLsFilesEntry(`100755 ${'c'.repeat(40)} 0\ttests/integration/fixtures/run.sh`),
-    ).toEqual({ mode: '100755', path: 'tests/integration/fixtures/run.sh' })
+    ).toEqual({
+      mode: '100755',
+      stage: '0',
+      path: 'tests/integration/fixtures/run.sh',
+    })
   })
 
   it('parses a symlink (120000)', () => {
@@ -57,7 +62,11 @@ describe('parseLsFilesEntry — mode variety', () => {
       parseLsFilesEntry(
         `120000 ${'d'.repeat(40)} 0\ttests/integration/fixtures/link-to-real`,
       ),
-    ).toEqual({ mode: '120000', path: 'tests/integration/fixtures/link-to-real' })
+    ).toEqual({
+      mode: '120000',
+      stage: '0',
+      path: 'tests/integration/fixtures/link-to-real',
+    })
   })
 
   it('does not classify an executable blob or a symlink as a gitlink', () => {
@@ -71,7 +80,7 @@ describe('parseLsFilesEntry — unusual but legal path bytes', () => {
     // Only the *first* tab after the stage digits is the record's structural
     // separator; a tab appearing later belongs to the path.
     const entry = parseLsFilesEntry(`100644 ${'a'.repeat(40)} 0\tweird\tpath.aero`)
-    expect(entry).toEqual({ mode: '100644', path: 'weird\tpath.aero' })
+    expect(entry).toEqual({ mode: '100644', stage: '0', path: 'weird\tpath.aero' })
   })
 
   it('preserves spaces in the path', () => {
@@ -80,6 +89,7 @@ describe('parseLsFilesEntry — unusual but legal path bytes', () => {
     )
     expect(entry).toEqual({
       mode: '100644',
+      stage: '0',
       path: 'tests/integration/fixtures/my service copy.aero',
     })
   })
@@ -87,33 +97,69 @@ describe('parseLsFilesEntry — unusual but legal path bytes', () => {
 
 describe('parseLsFilesEntry — merge-conflict stages (1/2/3, no stage 0)', () => {
   // `git ls-files -z -s` emits one record per stage for an unresolved
-  // conflict, all sharing the same path. The coordinator brief asked this
-  // to be verified rather than assumed "handled" or "not handled" — this is
-  // the verification of the parser's own behaviour: it parses every stage
-  // record structurally the same way an ordinary stage-0 record parses,
-  // dropping the stage number (the return type carries only `mode`/`path`).
-  // What `check-fixture-content.js` does with three identical *paths* in a
-  // row as a result is covered separately below, at `identifyCandidates`.
-  it('parses each stage of a conflicted entry, extracting mode and path identically', () => {
+  // conflict, all sharing the same path. This block used to record that the
+  // parser "drops the stage number (the return type carries only
+  // `mode`/`path`)" — which siklus 4 deliberately reversed, because the stage
+  // digit is the *only* signal separating an ordinary entry from an
+  // unresolved conflict, and `check-fixture-content.js` cannot filter
+  // conflicts out before the batch request without it. The comment is
+  // rewritten rather than only its assertions, since a comment claiming a
+  // wider contract than the code carries is the same defect class this whole
+  // item exists to remove.
+  it('parses each stage of a conflicted entry, extracting mode, stage and path', () => {
     const path = 'tests/integration/fixtures/conflict-case/disputed.aero'
     const stage1 = parseLsFilesEntry(`100644 ${'1'.repeat(40)} 1\t${path}`)
     const stage2 = parseLsFilesEntry(`100644 ${'2'.repeat(40)} 2\t${path}`)
     const stage3 = parseLsFilesEntry(`100644 ${'3'.repeat(40)} 3\t${path}`)
-    expect(stage1).toEqual({ mode: '100644', path })
-    expect(stage2).toEqual({ mode: '100644', path })
-    expect(stage3).toEqual({ mode: '100644', path })
+    expect(stage1).toEqual({ mode: '100644', stage: '1', path })
+    expect(stage2).toEqual({ mode: '100644', stage: '2', path })
+    expect(stage3).toEqual({ mode: '100644', stage: '3', path })
+  })
+
+  it('the stage each record carries is what `isUnmergedStage` reads — stage 0 alone is resolved', () => {
+    const path = 'tests/integration/fixtures/conflict-case/disputed.aero'
+    const resolved = parseLsFilesEntry(`100644 ${'a'.repeat(40)} 0\t${path}`)
+    const conflicted = [1, 2, 3].map((n) =>
+      parseLsFilesEntry(`100644 ${String(n).repeat(40)} ${n}\t${path}`),
+    )
+    expect(isUnmergedStage(/** @type {{stage: string}} */ (resolved).stage)).toBe(false)
+    for (const entry of conflicted) {
+      expect(isUnmergedStage(/** @type {{stage: string}} */ (entry).stage)).toBe(true)
+    }
+  })
+
+  it('parses a two-digit stage field structurally, and treats it as unmerged', () => {
+    // `\d+`, not `[0-3]`, is what the parser's own pattern accepts. Git never
+    // emits a stage above 3, so this is contract-pinning, not a real shape:
+    // whatever the parser is willing to *parse* must still be judged
+    // conservatively (anything that is not literally `0` is unmerged), not
+    // silently treated as resolved.
+    const entry = parseLsFilesEntry(
+      `100644 ${'a'.repeat(40)} 12\ttests/integration/fixtures/odd-stage.aero`,
+    )
+    expect(entry).toEqual({
+      mode: '100644',
+      stage: '12',
+      path: 'tests/integration/fixtures/odd-stage.aero',
+    })
+    expect(isUnmergedStage('12')).toBe(true)
   })
 })
 
-describe('identifyCandidates — a path listed more than once with unresolved (missing) content', () => {
-  // Simulates, at the pure-function boundary, what `check-fixture-content.js`
-  // hands `identifyCandidates` for a path git can only place at stage 1/2/3:
-  // `git cat-file --batch -c` on `:path` resolves stage 0, which does not
-  // exist for a conflicted path, so every query for it comes back `missing`
-  // — and because `classifyIndexedPaths` never deduplicates, the path
-  // appears in `paths` once per stage record.
+describe('identifyCandidates — a path listed more than once with content that cannot be read', () => {
+  // Not a merge conflict any more. Siklus 4 filters unmerged entries out in
+  // `check-fixture-content.js` *before* the batch request (see
+  // `isUnmergedStage` / `unmergedPathVerdicts`), so a conflicted path no
+  // longer reaches `identifyCandidates` at all and this block would be
+  // testing an unreachable state if it still claimed to simulate one. The
+  // shape below is reachable by the two routes that survive: the index really
+  // changing between `ls-files` and `cat-file`, and a stage-0 entry whose
+  // blob is absent from the object database. The duplication is retained as
+  // pure-function contract-pinning — `identifyCandidates` must judge every
+  // occurrence it is handed, never deduplicate silently — since nothing in
+  // its signature promises the caller passes distinct paths.
   it('fails closed (unreadable) for a duplicated, declared-extension path whose content is missing at every occurrence', () => {
-    const path = 'tests/integration/fixtures/conflict-case/disputed.aero'
+    const path = 'tests/integration/fixtures/vanished-blob/disputed.aero'
     /** @type {Map<string, import('./fixture-content-guard.js').BatchEntry>} */
     const contentByPath = new Map([[path, { status: 'missing' }]])
     const { candidates, unreadable } = identifyCandidates(
@@ -153,11 +199,12 @@ describe('identifyCandidates — a path listed more than once with unresolved (m
     // any help from `candidates` — so a caller cannot read "empty
     // candidates" as "nothing to worry about" here.
     //
-    // Still not exercised end-to-end (an active, uncommitted merge conflict
-    // is not a state `pretest` is realistically run against — see
-    // PROGRESS.md SETUP-05 tester report), but the function-level behaviour
-    // is real and is what this test pins.
-    const path = 'tests/integration/fixtures/conflict-case/disputed.bin'
+    // Exercised end-to-end too, by the route that still reaches this code
+    // after siklus 4 filtered conflicts out upstream: a stage-0 entry whose
+    // blob has been removed from the object database — see
+    // `tests/unit/check-fixture-content.e2e.test.js`, "fails a candidate
+    // whose blob cannot be read from the object database".
+    const path = 'tests/integration/fixtures/vanished-blob/disputed.bin'
     /** @type {Map<string, import('./fixture-content-guard.js').BatchEntry>} */
     const contentByPath = new Map([[path, { status: 'missing' }]])
     const { candidates, unreadable } = identifyCandidates(
@@ -182,10 +229,8 @@ describe('identifyCandidates — a path listed more than once with unresolved (m
     // `candidates`, hence nothing to `candidateVerdicts`), so this is the
     // real caller shape, not a hypothetical one.
     const summary = summariseRun({
-      indexedCount: 3,
-      allowlistedCount: 0,
       candidateVerdicts: [],
-      unreadable: ['tests/integration/fixtures/conflict-case/disputed.bin'],
+      unreadable: ['tests/integration/fixtures/vanished-blob/disputed.bin'],
     })
     expect(summary.exitCode).toBe(1)
     expect(summary.unreadableCount).toBe(1)

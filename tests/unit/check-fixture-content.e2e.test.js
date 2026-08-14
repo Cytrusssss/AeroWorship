@@ -533,6 +533,72 @@ describe('the passing case (ADR-0023 P0.6)', { timeout: GIT_TIMEOUT_MS }, () => 
   })
 })
 
+describe(
+  'each candidate is judged on ITS OWN staged bytes, for names that read like revisions (siklus 6)',
+  { timeout: GIT_TIMEOUT_MS },
+  () => {
+    // The clause siklus 6 added to `buildBatchRequest`'s contract: the object
+    // spec on each line must address a literal *path*, not a revision. The
+    // shape that broke it — a path beginning `0:`…`3:`, which `gitrevisions`
+    // reads as a stage selector — cannot be staged by Git for Windows at all
+    // (re-measured for this cycle: `update-index --cacheinfo` says
+    // `error: Invalid path '0:notes.dat'`, `--index-info` says
+    // `Ignoring path 0:notes.dat`, and `core.protectNTFS=false` does not open
+    // either, because `has_dos_drive_prefix` treats an alphanumeric run before
+    // `:` as a drive prefix), so it is proved as a pure property instead — see
+    // `scripts/fixture-content-guard.extra4.test.js`.
+    //
+    // What *can* be staged here, on any platform, is the rest of the class:
+    // names that look like `gitrevisions` syntax in every other way. They are
+    // proved against real git rather than a model, and the assertion is per
+    // path — `HEAD` is a candidate only if the guard sniffed the bytes staged
+    // at the path `HEAD`, and the declared file passes only if its own
+    // manifest key was matched.
+    it('reads `HEAD`, `a@{0}.aero` and `c~1.aero` as paths, not as revisions', () => {
+      const repo = createGuardRepo('rev-lookalike-names')
+      const root = 'tests/integration/fixtures'
+      const declared = `${root}/revnames/a@{0}.aero`
+      const undeclared = `${root}/revnames/c~1.aero`
+      // No declared extension and no magic number: this one is a candidate
+      // only via `looksLikeAeroSession` (ADR-0030), i.e. only if the guard
+      // really did read the blob staged at the path literally named `HEAD`.
+      const head = `${root}/revnames/HEAD`
+      try {
+        stage(repo, declared, '{"schema_version":1,"note":"SYNTHETIC"}')
+        stage(repo, undeclared, '{"schema_version":1,"note":"SYNTHETIC"}')
+        stage(
+          repo,
+          head,
+          '{"kind":"aeroworship.session","schema_version":1,' +
+            '"title":"SYNTHETIC — invented for this test, never a real service"}',
+        )
+        stage(
+          repo,
+          `${root}/fixtures.manifest.json`,
+          JSON.stringify({
+            entries: {
+              'revnames/a@{0}.aero': { synthetic: true, purpose: SYNTHETIC_PURPOSE },
+            },
+          }),
+        )
+
+        const result = runGuard(repo)
+        expect(result.status).not.toBe(0)
+
+        const reasons = reasonsByPath(result.stderr)
+        expect([...reasons.keys()].sort()).toEqual([head, undeclared].sort())
+        expect(reasons.get(head)?.[0]).toMatch(/no entry for "revnames\/HEAD"/)
+        expect(reasons.get(undeclared)?.[0]).toMatch(/no entry for "revnames\/c~1\.aero"/)
+        // The declared one is not among the rejections, and the count proves
+        // it was judged rather than skipped: three candidates, two rejected.
+        expect(result.stderr).toContain('2 of 3 candidate(s) rejected.')
+      } finally {
+        rmSync(repo, { recursive: true, force: true })
+      }
+    })
+  },
+)
+
 describe('index-visibility failure modes (P1 #7)', { timeout: GIT_TIMEOUT_MS }, () => {
   it('treats a genuinely empty index as a hard failure, not as "0 candidates found"', () => {
     // A fresh repository with nothing ever staged — the guard must not
@@ -598,9 +664,12 @@ describe(
      * before/after (see PROGRESS.md, SETUP-05 siklus 2 entry): a single index
      * entry whose *path string* is the real manifest's own path, followed by a
      * raw `\n`, followed by an unrelated tail. Under the pre-fix guard,
-     * `buildBatchRequest` wrote this as `` `:${path}\n` `` — which is itself
-     * two stdin lines, the first byte-for-byte identical to the query for the
-     * real manifest entry sitting earlier in the same batch. `git cat-file
+     * `buildBatchRequest` wrote such a path onto its own stdin line unchecked
+     * — as `` `:${path}\n` `` at the time, as `` `:0:${path}\n` `` since
+     * siklus 6 spelled the stage digit out (`BATCH_SPEC_PREFIX`); the desync
+     * does not depend on which prefix it is. Either way that one "line" is
+     * really two, the first byte-for-byte identical to the query for the real
+     * manifest entry sitting earlier in the same batch. `git cat-file
      * --batch` answers one line with one entry, so from that point on every
      * entry `parseCatFileBatch` read was shifted by one and attributed to the
      * wrong key. The fix (`classifyIndexedPaths`'s `unsafe` bucket) never lets
@@ -770,6 +839,21 @@ describe(
       expect(output.trim()).toBe(
         ':tests/integration/fixtures/gitlink-case/church-repo missing',
       )
+
+      // The same measurement in the form the guard actually writes since
+      // siklus 6 (`BATCH_SPEC_PREFIX`, `:0:`). `BATCH_SPEC_PREFIX`'s doc claims
+      // the stage digit "widens nothing else" and cites a gitlink as one of the
+      // three cases where the two forms agree; that claim is re-measured here
+      // rather than trusted, because it is the form this guard's own behaviour
+      // now depends on.
+      const explicit = git(
+        outer,
+        ['cat-file', '--batch'],
+        ':0:tests/integration/fixtures/gitlink-case/church-repo\n',
+      )
+      expect(explicit.trim()).toBe(
+        ':0:tests/integration/fixtures/gitlink-case/church-repo missing',
+      )
     })
 
     it('rejects a gitlink both inside and outside a fixtures/ directory, each for being a gitlink', () => {
@@ -799,6 +883,77 @@ describe(
       // merely failed to read, which is summarised separately ("could not be
       // verified") and would leave this line absent.
       expect(result.stderr).toContain('2 of 2 candidate(s) rejected.')
+    })
+  },
+)
+
+describe(
+  'a CONFLICTED gitlink gets exactly one verdict, and it is the gitlink one (siklus 6, W2)',
+  { timeout: GIT_TIMEOUT_MS },
+  () => {
+    // The ordering `check-fixture-content.js` fixed: gitlinks are split out of
+    // the **full** `ls-files` listing, before the unmerged split. Taken from
+    // the stage-0 half instead, a submodule pointer that two branches moved to
+    // two different commits (stages 2 and 3, no stage 0) reached neither
+    // `gitlinkVerdict` nor `unmergedPathVerdicts` — the latter judges by name,
+    // and `vendor/…` is no `.aero` — and so got no verdict at all. That is the
+    // gap `gitlinkVerdict` exists to close, reopened by the order of two
+    // filters, and it is invisible to any test that only stages a resolved
+    // submodule.
+    //
+    // Built with `update-index --index-info` rather than by merging two
+    // branches that each ran `git submodule add`: the shape under test is the
+    // index shape (one path, mode 160000, stages 2 and 3, no stage 0), which
+    // this produces exactly and in one call — no clone, no second repository,
+    // no `protocol.file.allow` — and the harness asserts it got that shape from
+    // git itself before running the guard. Neither commit object exists in this
+    // repository's object database, which is true of a real gitlink too (see
+    // the empirical `cat-file --batch` case in the suite above).
+    //
+    // No `beforeAll`: the repository is built and destroyed inside the `it`, so
+    // this suite adds nothing to the file's hook-timeout budget.
+    it('rejects it once as a submodule, and does not report it as a skipped merge conflict', () => {
+      const repo = createGuardRepo('gitlink-conflict')
+      const gitlink = 'vendor/gitlink-in-conflict'
+      try {
+        stage(
+          repo,
+          'docs/ordinary.txt',
+          'Synthetic text so the index is not gitlink-only.\n',
+        )
+        git(
+          repo,
+          ['update-index', '--index-info'],
+          `160000 ${'1'.repeat(40)} 2\t${gitlink}\n160000 ${'2'.repeat(40)} 3\t${gitlink}\n`,
+        )
+        // The harness proves it built the shape it claims: two unmerged
+        // records, both mode 160000, before anything is asserted of the guard.
+        const unmerged = git(repo, ['ls-files', '-u', '--', gitlink])
+          .trimEnd()
+          .split('\n')
+        expect(unmerged).toHaveLength(2)
+        expect(unmerged.every((line) => line.startsWith('160000 '))).toBe(true)
+
+        const result = runGuard(repo)
+        expect(result.status).not.toBe(0)
+
+        const reasons = reasonsByPath(result.stderr)
+        expect([...reasons.keys()]).toEqual([gitlink])
+        // One verdict, not one per stage — a conflicted pointer is one thing.
+        expect(reasons.get(gitlink)).toHaveLength(1)
+        expect(reasons.get(gitlink)?.[0]).toMatch(
+          /^this is a git submodule \(mode 160000\)/,
+        )
+        expect(result.stderr).toContain('1 of 1 candidate(s) rejected.')
+
+        // It must not also have been counted among the paths the guard skips
+        // for being unmerged: that is the bucket it fell into, unjudged, when
+        // the two filters ran the other way round.
+        expect(result.stdout).not.toMatch(/unresolved merge conflict/)
+        expect(result.stderr).not.toMatch(/mid-scan/)
+      } finally {
+        rmSync(repo, { recursive: true, force: true })
+      }
     })
   },
 )
@@ -892,6 +1047,196 @@ describe(
         } finally {
           cleanup(repo, [path])
         }
+      } finally {
+        rmSync(repo, { recursive: true, force: true })
+      }
+    })
+  },
+)
+
+describe(
+  'unresolved merge conflicts are split out before the batch request (siklus 4)',
+  { timeout: GIT_TIMEOUT_MS },
+  () => {
+    // Before siklus 4 every path in a conflict was queried as `:path`, which
+    // resolves stage 0 — a stage a conflicted path does not have — so all three
+    // of its records came back `missing` and the run failed, for the whole
+    // duration of the conflict, blaming "index changed mid-scan?". Both halves
+    // of the fix need proving against the real CLI: an ordinary conflict must
+    // no longer block `npm test` at all, and a conflicted `.aero` must still be
+    // reported, by name, with a reason that is true.
+    //
+    // No `beforeAll` here on purpose: each case builds and destroys its own
+    // repository inside the `it`, so this suite adds no hook-timeout budget to
+    // the file (see the file doc on `hookTimeout` being a separate budget from
+    // the `describe`-level `timeout`).
+
+    /**
+     * Builds a repository holding a real, unresolved merge conflict on
+     * `relPath` — two branches, two commits, one failed merge. Not simulated
+     * with `update-index --cacheinfo`: the point is that git itself produced
+     * the stage 1/2/3 shape this guard now has to recognise.
+     *
+     * @param {string} label
+     * @param {string} relPath Path to put in conflict.
+     * @param {(repo: string) => void} [seed] Extra staging for the base commit.
+     * @returns {string} absolute path to the new repo
+     */
+    function createConflictedRepo(label, relPath, seed) {
+      const repo = createGuardRepo(label)
+      git(repo, ['config', 'user.email', 'tester@example.invalid'])
+      git(repo, ['config', 'user.name', 'AeroWorship tester'])
+      seed?.(repo)
+      stage(repo, relPath, '{"schema_version":1,"note":"SYNTHETIC base revision"}')
+      git(repo, ['add', '-A', '.'])
+      git(repo, ['commit', '-q', '-m', 'synthetic base commit'])
+
+      git(repo, ['checkout', '-q', '-b', 'incoming'])
+      stage(repo, relPath, '{"schema_version":1,"note":"SYNTHETIC incoming revision"}')
+      git(repo, ['commit', '-q', '-m', 'synthetic incoming revision'])
+
+      git(repo, ['checkout', '-q', 'main'])
+      stage(repo, relPath, '{"schema_version":1,"note":"SYNTHETIC local revision"}')
+      git(repo, ['commit', '-q', '-m', 'synthetic local revision'])
+
+      try {
+        git(repo, ['merge', '-q', 'incoming'])
+        throw new Error('harness: the merge was expected to conflict and did not')
+      } catch (error) {
+        // A conflicting merge exits non-zero; anything else is a harness bug.
+        if (!(/** @type {{ status?: number }} */ (error).status)) throw error
+      }
+      // The harness proves it built what it claims before anything is asserted
+      // about the guard: `ls-files -u` lists only unmerged entries.
+      expect(git(repo, ['ls-files', '-u', '--', relPath]).trim()).not.toBe('')
+      return repo
+    }
+
+    it('does not fail the run for a conflicted ordinary file, and says which paths it skipped', () => {
+      const repo = createConflictedRepo('merge-plain', 'docs/notes.txt')
+      try {
+        const result = runGuard(repo)
+        expect(result.status).toBe(0)
+        expect(result.stdout).toMatch(/unresolved merge conflict/)
+        expect(result.stdout).toMatch(/1 path\(s\) are in an unresolved merge conflict/)
+        // The accusation the old behaviour printed, for a cause that had
+        // nothing to do with it. It must be gone, not merely outweighed.
+        expect(result.stderr).not.toMatch(/mid-scan/)
+        expect(result.stderr).toBe('')
+      } finally {
+        rmSync(repo, { recursive: true, force: true })
+      }
+    })
+
+    it('still rejects a conflicted .aero by name, with the conflict as the stated reason', () => {
+      const root = 'tests/integration/merge-case/fixtures'
+      const aeroPath = `${root}/disputed.aero`
+      const repo = createConflictedRepo('merge-aero', aeroPath, (r) => {
+        // Declared correctly and committed at stage 0 from the start, so the
+        // rejection below cannot be an undeclared-fixture rejection wearing a
+        // different hat.
+        stage(
+          r,
+          `${root}/fixtures.manifest.json`,
+          JSON.stringify({
+            entries: { 'disputed.aero': { synthetic: true, purpose: SYNTHETIC_PURPOSE } },
+          }),
+        )
+      })
+      try {
+        const result = runGuard(repo)
+        expect(result.status).not.toBe(0)
+
+        const reasons = reasonsByPath(result.stderr)
+        expect([...reasons.keys()]).toEqual([aeroPath])
+        expect(reasons.get(aeroPath)).toHaveLength(1)
+        expect(reasons.get(aeroPath)?.[0]).toMatch(/^this path is in an unresolved merge/)
+        // Not reported as unreadable — that was the old, wrong diagnosis, and
+        // it would appear as a second reason for this same path.
+        expect(result.stderr).not.toMatch(/mid-scan/)
+        expect(result.stderr).toContain('1 of 1 candidate(s) rejected.')
+
+        // The reason text promises the file "is then checked normally" once
+        // resolved and `git add`ed. Proving that closes the loop: a developer
+        // following the instruction must actually get past the guard.
+        writeFileSync(
+          join(repo, aeroPath),
+          '{"schema_version":1,"note":"SYNTHETIC resolved revision"}',
+        )
+        git(repo, ['add', '--', aeroPath])
+        const resolved = runGuard(repo)
+        expect(resolved.status).toBe(0)
+        expect(resolved.stdout).toMatch(/candidate\(s\) verified synthetic, clean\./)
+        expect(resolved.stdout).not.toMatch(/unresolved merge conflict/)
+      } finally {
+        rmSync(repo, { recursive: true, force: true })
+      }
+    })
+
+    it('blames the CONFLICTED MANIFEST, not the fixture, when the manifest is the unmerged one (siklus 6, W3)', () => {
+      // The `unmergedPaths` argument `check-fixture-content.js` now threads
+      // into `evaluateCandidate`, end to end. The fixture itself is untouched
+      // by the merge and sits at stage 0, so it is still a candidate; its
+      // manifest has no stage 0, is filtered out of the batch request with
+      // every other unmerged path, and so comes back absent. The verdict was
+      // always right — what was wrong was the sentence: "is not in the index —
+      // create it" for a file sitting in the index at stages 1/2/3, the same
+      // unescapable loop `manifestPathsForCandidates` had to remove once.
+      const root = 'tests/integration/manifest-merge/fixtures'
+      const manifestPath = `${root}/fixtures.manifest.json`
+      const aeroPath = `${root}/declared.aero`
+      const repo = createConflictedRepo('merge-manifest', manifestPath, (r) => {
+        stage(r, aeroPath, '{"schema_version":1,"note":"SYNTHETIC, never edited"}')
+      })
+      try {
+        // The conflict really is on the manifest alone: the fixture is at
+        // stage 0, so it is judged as an ordinary candidate.
+        expect(git(repo, ['ls-files', '-u', '--', manifestPath]).trim()).not.toBe('')
+        expect(git(repo, ['ls-files', '-u', '--', aeroPath]).trim()).toBe('')
+
+        const result = runGuard(repo)
+        expect(result.status).not.toBe(0)
+
+        const reasons = reasonsByPath(result.stderr)
+        expect([...reasons.keys()]).toEqual([aeroPath])
+        expect(reasons.get(aeroPath)).toHaveLength(1)
+        const reason = reasons.get(aeroPath)?.[0] ?? ''
+        expect(reason).toMatch(/is itself in an unresolved merge conflict/)
+        expect(reason).toMatch(/resolve the conflict and `git add` the manifest/)
+        // The sentence that sent a developer to create a file they already
+        // had. It must be gone for this case, not merely accompanied.
+        expect(reason).not.toMatch(/is not in the index/)
+
+        // …and the promise it makes must hold: resolving the manifest clears
+        // the run, so the instruction is a way out and not a loop.
+        writeFileSync(
+          join(repo, manifestPath),
+          JSON.stringify({
+            entries: { 'declared.aero': { synthetic: true, purpose: SYNTHETIC_PURPOSE } },
+          }),
+        )
+        git(repo, ['add', '--', manifestPath])
+        const resolved = runGuard(repo)
+        expect(resolved.status).toBe(0)
+        expect(resolved.stdout).toMatch(/candidate\(s\) verified synthetic, clean\./)
+      } finally {
+        rmSync(repo, { recursive: true, force: true })
+      }
+    })
+
+    it('does not report a conflicted .png or manifest — only the declared extensions', () => {
+      // The other half of the deliberate line in `unmergedPathVerdicts`: a
+      // conflict on ordinary binary or JSON content is work in progress, and
+      // blocking it would be exactly the over-blocking siklus 4 removed.
+      const repo = createConflictedRepo(
+        'merge-png',
+        'tests/integration/fixtures/merge-media/thumb.png',
+      )
+      try {
+        const result = runGuard(repo)
+        expect(result.status).toBe(0)
+        expect(reasonsByPath(result.stderr).size).toBe(0)
+        expect(result.stdout).toMatch(/unresolved merge conflict/)
       } finally {
         rmSync(repo, { recursive: true, force: true })
       }

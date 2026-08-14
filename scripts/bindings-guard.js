@@ -92,7 +92,10 @@ export function compareBindings(generated, committed) {
 
 /**
  * @typedef {object} LineDifference
- * @property {number} line 1-based number of the first line that differs.
+ * @property {number} line 1-based number of the first line that differs — or,
+ *   when the two differ in nothing but their line endings, one past the last
+ *   line they share, which names no line in either file (see
+ *   `describeFirstDifference`).
  * @property {string | null} generated That line as generated, or `null` if the
  *   generated file has no such line (it is the shorter of the two).
  * @property {string | null} committed That line as committed, or `null` if the
@@ -113,6 +116,15 @@ export function compareBindings(generated, committed) {
  * line-ending change is still drift. It should not arise here — `.gitattributes`
  * pins the working tree to LF — but if it ever does, the reader deserves a
  * message that says so instead of a diff where both lines look the same.
+ *
+ * When the line endings are the *only* difference, the strip leaves the two
+ * line arrays identical, so there is no line to point at: the fallback below
+ * returns `null` on both sides, with a `line` one past the last line either
+ * file has. That pair of `null`s is the signature of "identical line for line,
+ * different bytes", and it is what `check-bindings.js` recognises to print the
+ * line-ending message the paragraph above promises — rather than
+ * `first difference at line N` quoting `(no such line)` twice, which is what
+ * naming a line here would come to.
  *
  * @param {string} generated
  * @param {string} committed

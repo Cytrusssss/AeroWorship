@@ -116,7 +116,9 @@ describe('parseCatFileBatch — additional wire-format bytes', () => {
    */
   function buildBatchBuffer(entries) {
     const chunks = entries.map(({ key, content }) => {
-      if (content === null) return Buffer.from(`:${key} missing\n`, 'ascii')
+      // `:0:`, not `:` — git quotes the query line back verbatim, and the
+      // query is written with the explicit stage-0 prefix (`BATCH_SPEC_PREFIX`).
+      if (content === null) return Buffer.from(`:0:${key} missing\n`, 'ascii')
       const fakeSha = 'b'.repeat(40)
       const header = Buffer.from(`${fakeSha} blob ${content.length}\n`, 'ascii')
       return Buffer.concat([header, content, Buffer.from('\n', 'ascii')])
@@ -190,7 +192,7 @@ describe('parseCatFileBatch — additional wire-format bytes', () => {
       'tests/integration/fixtures/b.aerotpl',
     ]
     expect(buildBatchRequest(keys)).toBe(
-      ':tests/integration/fixtures/a.aero\n:tests/integration/fixtures/b.aerotpl\n',
+      ':0:tests/integration/fixtures/a.aero\n:0:tests/integration/fixtures/b.aerotpl\n',
     )
   })
 })

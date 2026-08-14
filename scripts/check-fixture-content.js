@@ -58,9 +58,12 @@ import {
   identifyAllowlistedExtensionCandidates,
   identifyCandidates,
   isGitlinkMode,
+  isUnmergedStage,
+  manifestPathsForCandidates,
   parseCatFileBatch,
   parseLsFilesEntry,
   summariseRun,
+  unmergedPathVerdicts,
   unsafePathVerdict,
 } from './fixture-content-guard.js'
 
@@ -107,7 +110,7 @@ async function main() {
   // embedded `\n` or `\r` in a path never corrupts *this* parse — that
   // hazard only exists downstream, in the `git cat-file --batch` stdin
   // protocol `classifyIndexedPaths`'s `unsafe` bucket guards against.
-  /** @type {Array<{ mode: string, path: string }>} */
+  /** @type {Array<{ mode: string, stage: string, path: string }>} */
   let entries
   try {
     const raw = git(['ls-files', '-z', '-s'])
@@ -145,25 +148,91 @@ async function main() {
     return 1
   }
 
-  const gitlinks = entries.filter((entry) => isGitlinkMode(entry.mode)).map((e) => e.path)
-  const indexed = entries.filter((entry) => !isGitlinkMode(entry.mode)).map((e) => e.path)
+  // Gitlinks come out of the **full** listing, before the unmerged split
+  // below — not out of its stage-0 half. A submodule pointer can be conflicted
+  // too (stages 2 and 3, no stage 0), and splitting it off after the unmerged
+  // filter meant such an entry reached neither `gitlinkVerdict` nor
+  // `unmergedPathVerdicts` (which judges by name, and `vendor/sub` is no
+  // `.aero`) and got no verdict at all. Deduplicated because a conflicted
+  // gitlink contributes one record per stage; rejected once, for what it is.
+  // The exclusion below is per **path**, not per record, and that is what
+  // keeps one path to one verdict: in a mixed-mode conflict (stage 2 a
+  // gitlink, stage 3 a blob on the same path) the path is judged only by
+  // `gitlinkVerdict` and does not also appear in `unmerged` or its count line,
+  // where a per-record split would have produced two verdicts for it and
+  // inflated `checkedCount`.
+  const gitlinks = [
+    ...new Set(entries.filter((entry) => isGitlinkMode(entry.mode)).map((e) => e.path)),
+  ]
+  const gitlinkPaths = new Set(gitlinks)
+  const blobs = entries.filter((entry) => !gitlinkPaths.has(entry.path))
+
+  // An unresolved merge conflict has no stage 0, so `:0:path` — which is what
+  // `buildBatchRequest` asks for — is `missing` for it, three times over (one
+  // record per stage). Left in `indexed`, that turned every `npm test` run
+  // during a conflict into a failure blaming a mid-scan index change. Split
+  // out here and judged by name only; see `unmergedPathVerdicts`.
+  const unmerged = blobs
+    .filter((entry) => isUnmergedStage(entry.stage))
+    .map((e) => e.path)
+  const unmergedPaths = new Set(unmerged)
+  const indexed = blobs
+    .filter((entry) => !isUnmergedStage(entry.stage))
+    .map((e) => e.path)
 
   const { allowlisted, toInspect, unsafe } = classifyIndexedPaths(indexed)
 
+  // The allowlist (`src-tauri/icons/` today) only excuses a path from the
+  // `cat-file`/sniff round-trip below — it does not excuse the
+  // declared-extension check, which needs no content at all (ADR-0023's
+  // "di mana pun ia berada"; see `ALLOWLISTED_PREFIXES`'s doc). A `.aero`
+  // staged under an allowlisted prefix is still a candidate, and still gets
+  // rejected by `evaluateCandidate` for having no `fixtures/` ancestor.
+  const allowlistedCandidates = identifyAllowlistedExtensionCandidates(allowlisted)
+  // …but if it *does* have one, its manifest sits under the allowlisted
+  // prefix too and so is absent from `toInspect`. Fetch those manifests
+  // explicitly, or `evaluateCandidate` reports a manifest that exists as
+  // missing — see `manifestPathsForCandidates`.
+  const inspected = new Set(toInspect)
+  const batchKeys = [
+    ...toInspect,
+    ...manifestPathsForCandidates(allowlistedCandidates).filter((p) => !inspected.has(p)),
+  ]
+
   /** @type {Map<string, import('./fixture-content-guard.js').BatchEntry>} */
   let contentByPath = new Map()
-  if (toInspect.length > 0) {
+  if (batchKeys.length > 0) {
+    // Built before the git call, under its own heading: `buildBatchRequest`
+    // throws for a path `breaksBatchLineProtocol` flags, and evaluating it
+    // inside the git call's own `try` below reported that throw as "git
+    // cat-file --batch failed" — a heading blaming a command that had not run
+    // yet. Unreachable today —
+    // every key here came through `classifyIndexedPaths`, whose `unsafe`
+    // bucket is exactly what that throw is for — but it stays caught, so a
+    // future caller that skips the classification step still exits 1 rather
+    // than dying on an unhandled throw.
+    /** @type {string} */
+    let batchRequest
+    try {
+      batchRequest = buildBatchRequest(batchKeys)
+    } catch (error) {
+      console.error(
+        'fixture content guard: could not build the `git cat-file --batch` request.',
+      )
+      console.error(String(error))
+      return 1
+    }
     /** @type {Buffer} */
     let batchOutput
     try {
-      batchOutput = git(['cat-file', '--batch'], buildBatchRequest(toInspect))
+      batchOutput = git(['cat-file', '--batch'], batchRequest)
     } catch (error) {
       console.error('fixture content guard: `git cat-file --batch` failed.')
       console.error(String(error))
       return 1
     }
     try {
-      contentByPath = parseCatFileBatch(batchOutput, toInspect)
+      contentByPath = parseCatFileBatch(batchOutput, batchKeys)
     } catch (error) {
       console.error(String(error))
       return 1
@@ -171,33 +240,28 @@ async function main() {
   }
 
   const { candidates, unreadable } = identifyCandidates(toInspect, contentByPath)
-  // The allowlist (`src-tauri/icons/` today) only excuses a path from the
-  // `cat-file`/sniff round-trip above — it does not excuse the
-  // declared-extension check, which needs no content at all (ADR-0023's
-  // "di mana pun ia berada"; see `ALLOWLISTED_PREFIXES`'s doc). A `.aero`
-  // staged under an allowlisted prefix is still a candidate, and still gets
-  // rejected by `evaluateCandidate` for having no `fixtures/` ancestor.
-  const allowlistedCandidates = identifyAllowlistedExtensionCandidates(allowlisted)
-  // Gitlinks and `unsafe` (newline/CR-carrying) paths are automatic
-  // violations, judged before — and independently of — anything content-based:
-  // neither is ever handed to `git cat-file --batch`, so neither can ever be
-  // reported as clean by omission (see `gitlinkVerdict` / `unsafePathVerdict`
-  // in `fixture-content-guard.js`).
+  // Gitlinks, `unsafe` (newline/CR-carrying) paths and unmerged
+  // `.aero`/`.aerotpl` paths are automatic violations, judged before — and
+  // independently of — anything content-based: none of the three is ever
+  // handed to `git cat-file --batch`, so none can ever be reported as clean by
+  // omission (see `gitlinkVerdict` / `unsafePathVerdict` /
+  // `unmergedPathVerdicts` in `fixture-content-guard.js`).
   const candidateVerdicts = [
     ...gitlinks.map(gitlinkVerdict),
     ...unsafe.map(unsafePathVerdict),
-    ...candidates.map((candidate) => evaluateCandidate(candidate, contentByPath)),
+    ...unmergedPathVerdicts(unmerged),
+    // `unmergedPaths` only sharpens the sentence when a candidate's *manifest*
+    // is the conflicted file: without it the verdict says a manifest sitting at
+    // stages 1/2/3 "is not in the index — create it". See `evaluateCandidate`.
+    ...candidates.map((candidate) =>
+      evaluateCandidate(candidate, contentByPath, unmergedPaths),
+    ),
     ...allowlistedCandidates.map((candidate) =>
-      evaluateCandidate(candidate, contentByPath),
+      evaluateCandidate(candidate, contentByPath, unmergedPaths),
     ),
   ]
 
-  const summary = summariseRun({
-    indexedCount: entries.length,
-    allowlistedCount: allowlisted.length,
-    candidateVerdicts,
-    unreadable,
-  })
+  const summary = summariseRun({ candidateVerdicts, unreadable })
 
   for (const verdict of candidateVerdicts) {
     if (!verdict.ok) {
@@ -205,10 +269,30 @@ async function main() {
     }
   }
   for (const path of unreadable) {
+    // Two different findings, and saying "index changed mid-scan?" for both
+    // accuses the wrong cause: a path git answered `missing` for really did
+    // vanish from stage 0 between the two calls, but a path whose response
+    // line did not parse at all is a protocol-level surprise the developer
+    // can only act on if the offending line is quoted back.
+    const entry = contentByPath.get(path)
+    const detail =
+      entry?.status === 'unparsed'
+        ? '`git cat-file --batch` answered with a line this guard could not parse: ' +
+          `${JSON.stringify(entry.header)}`
+        : 'listed by `git ls-files` but its content could not be confirmed present in the ' +
+          'index a moment later (index changed mid-scan?)'
     console.error(
-      `fixture content guard: ${path}\n    ` +
-        'listed by `git ls-files` but its content could not be confirmed present in the ' +
-        'index a moment later (index changed mid-scan?) — treated as unverified, not clean.',
+      `fixture content guard: ${path}\n    ${detail} — treated as unverified, not clean.`,
+    )
+  }
+
+  // Said out loud rather than left as a silently smaller scan: these paths
+  // were listed by `git ls-files` and then deliberately not inspected.
+  if (unmerged.length > 0) {
+    console.log(
+      `fixture content guard: ${unmergedPaths.size} path(s) are in an unresolved merge ` +
+        'conflict and have no staged content to read; they are checked in full once resolved ' +
+        'and `git add`ed. Any .aero/.aerotpl among them is reported above.',
     )
   }
 

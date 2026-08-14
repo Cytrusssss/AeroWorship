@@ -43,9 +43,12 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled"] 
 # `thiserror` for four `Display` impls to protect the 15 MB installer budget
 # (see `db/error.rs`). Taking it as a dev-dependency means the derive is
 # compiled only into the `cfg(test)` build of this lib — `#[cfg_attr(test,
-# derive(ts_rs::TS))]` — so not one byte of it reaches the shipped binary, and
-# `cargo build`/`cargo clippy` never link it. It does appear in `Cargo.lock`;
-# that is bookkeeping, not weight.
+# derive(ts_rs::TS))]` — so not one byte of it reaches the shipped binary.
+# `cargo build` never links it, and neither does a plain `cargo clippy`;
+# `cargo clippy --all-targets` does compile it, because that lints the test
+# targets and the test build is exactly where the derive lives. That costs
+# lint time, never installer bytes. It does appear in `Cargo.lock`; that is
+# bookkeeping, not weight.
 #
 # `serde-compat` (a default feature) is kept on purpose. Nothing exported today
 # carries a serde attribute, so it currently does nothing — but the moment

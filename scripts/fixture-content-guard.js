@@ -125,13 +125,13 @@ export function hasDeclaredExtension(path) {
 
 /**
  * Byte that would corrupt the line-delimited wire protocol `buildBatchRequest`
- * writes and `parseCatFileBatch` reads by position: a `:path\n` object spec
+ * writes and `parseCatFileBatch` reads by position: a `:0:path\n` object spec
  * is one line, and `git cat-file --batch` reads stdin one line per query. Git
  * itself does not forbid `\n` inside a tracked path — the only bytes it
  * refuses are `/` and NUL — so a path can legitimately carry one, and when it
- * does, `` `:${path}\n` `` silently becomes *two* stdin lines: `` `:` `` plus
- * everything up to the embedded newline, then everything after it as an
- * unrelated second query. Every entry requested after that point shifts by
+ * does, `` `:0:${path}\n` `` silently becomes *two* stdin lines: `` `:0:` ``
+ * (`BATCH_SPEC_PREFIX`) plus everything up to the embedded newline, then
+ * everything after it as an unrelated second query. Every entry requested after that point shifts by
  * one, and `parseCatFileBatch`'s positional correlation — reading entry N of
  * the response as the content for key N of the request — reads the wrong
  * file's bytes as this path's content from then on, with no error raised.
@@ -144,6 +144,12 @@ export function hasDeclaredExtension(path) {
  * correctness actually depends on, and screening bytes this guard has no
  * concrete failure mode for would be a check nobody could explain a year
  * from now.
+ *
+ * Framing is only half of what correlation needs, and this function is only
+ * the framing half: the other half is that the object spec on each line
+ * actually addresses the path it was built from, which no byte screen can
+ * deliver because `:` is legal in a tracked path and meaningful in the spec
+ * syntax. That half is `BATCH_SPEC_PREFIX`'s job — see `buildBatchRequest`.
  *
  * @param {string} path
  * @returns {boolean}
@@ -305,14 +311,149 @@ export function sniffMediaKind(buffer) {
 }
 
 /**
- * Builds the stdin payload for `git cat-file --batch`, one `:path` object
- * spec per line — `:path` (no revision before the colon) addresses stage 0
- * of `path` in the **index**, i.e. what would be committed right now,
- * matching this guard's job of judging staged content rather than the
- * working tree. Verified against git 2.47.1: a query for a path absent from
- * the index echoes the literal query text back followed by ` missing`,
- * which is what makes per-line correlation in `parseCatFileBatch` reliable
- * even for paths that turn out not to exist.
+ * Top-level `kind` every `.aero` session document is required to carry —
+ * `docs/PRD.md` Appendix C, C.1 and the C.3 worked example both spell it, and
+ * NFR-28's load-time validation rejects a document without it. That makes it
+ * the one field a real order-of-service file cannot drop and still be a real
+ * order-of-service file.
+ */
+export const AERO_SESSION_KIND = 'aeroworship.session'
+
+/**
+ * Whether `buffer` is an Appendix C `.aero` session document, whatever the
+ * file is *named* (ADR-0030).
+ *
+ * `hasDeclaredExtension` and `sniffMediaKind` between them miss the simplest
+ * evasion there is: a real `.aero` renamed `service.dat`. It carries no
+ * declared extension and no binary magic number, so both checks pass it. The
+ * bytes are already in hand at the point this is called — `check-fixture-
+ * content.js` reads the full staged content of every tracked, non-allowlisted
+ * path anyway, to sniff media — so closing that hole costs one more look at a
+ * buffer that was fetched regardless.
+ *
+ * The detection has to *parse*, not merely search. `docs/PRD.md` is tracked
+ * and contains the literal `aeroworship.session` twice (Appendix C's schema
+ * and its worked example); a bare `buffer.includes(...)` would make the PRD a
+ * candidate, reject it for having no `fixtures/` ancestor, and turn `npm test`
+ * red on a clean checkout. Requiring the buffer to parse as JSON with that
+ * value at the *top level* fails the PRD at the very first test — a markdown
+ * file starts with `#`, not `{`.
+ *
+ * Three filters, cheapest first, so the overwhelming majority of tracked files
+ * cost one byte comparison and nothing else:
+ *
+ *   1. first non-whitespace byte (after an optional UTF-8 BOM) is `{` — every
+ *      source file, every markdown doc, every binary is gone here;
+ *   2. the literal appears somewhere in the bytes — a plain memory search,
+ *      which drops every other JSON file in the repository (`package.json`,
+ *      `tsconfig.json`, a `fixtures.manifest.json`);
+ *   3. only then, `JSON.parse` — decoding from the same offset filter 1
+ *      started at, so the BOM filter 1 deliberately steps over cannot come
+ *      back as a leading U+FEFF that `JSON.parse` refuses. Decoding from byte
+ *      0 made the `catch` below cancel filter 1's own allowance, and a
+ *      BOM-prefixed `.aero` renamed `service.dat` — the shape Windows Notepad
+ *      writes, on the OS this product targets — passed the guard untouched.
+ *
+ * No size cap, deliberately, even though Appendix C caps a valid `.aero` at
+ * 256 KB: a cap here would be a documented way to smuggle one past this
+ * function by padding it, and the two filters above already mean `JSON.parse`
+ * runs on approximately nothing.
+ *
+ * Known and accepted gap (ADR-0030): an encrypted or compressed `.aero` stops
+ * being JSON and is not detected. Nothing short of a content-agnostic
+ * entropy heuristic would catch that, and ADR-0023 already rejected
+ * "looks-like" heuristics for this guard on the grounds that they cannot tell
+ * a real lyric from a synthetic one.
+ *
+ * Second known and accepted gap, and the only input on which filters 2 and 3
+ * disagree: filter 2 searches **raw bytes**, so a document that spells the
+ * sentinel with JSON escapes — `{"kind":"aeroworship\u002esession"}` parses to
+ * exactly `AERO_SESSION_KIND` — never contains the literal and is refused
+ * before `JSON.parse` is reached. Left that way on purpose rather than
+ * overlooked: filter 2 is what keeps this function from parsing every JSON
+ * file in the index on every run, and nothing AeroWorship ships emits an
+ * escaped `kind`, so the evasion costs a deliberate hand-rewrite while the
+ * filter pays for itself on every path. Named here with the same weight as the
+ * encrypted/compressed gap above, because it is the same kind of thing: a
+ * shape of real `.aero` this function will not catch.
+ *
+ * @param {Buffer} buffer
+ * @returns {boolean}
+ */
+export function looksLikeAeroSession(buffer) {
+  // Where the document proper begins: past a UTF-8 BOM if there is one. Filter
+  // 3 decodes from here rather than from byte 0 — see the doc above.
+  const bodyStart =
+    buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf
+      ? 3
+      : 0
+  let start = bodyStart
+  while (start < buffer.length) {
+    const byte = buffer[start]
+    if (byte !== 0x09 && byte !== 0x0a && byte !== 0x0d && byte !== 0x20) break
+    start += 1
+  }
+  if (buffer[start] !== 0x7b /* { */) return false
+  if (!buffer.includes(AERO_SESSION_KIND)) return false
+
+  /** @type {unknown} */
+  let parsed
+  try {
+    parsed = JSON.parse(buffer.toString('utf8', bodyStart))
+  } catch {
+    return false
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false
+  return /** @type {Record<string, unknown>} */ (parsed).kind === AERO_SESSION_KIND
+}
+
+/**
+ * Object-spec prefix every batch query is written with, and the prefix git
+ * echoes back verbatim on a `missing` line. Written once because
+ * `buildBatchRequest` and `parseCatFileBatch` have to agree on it byte for
+ * byte or the missing-entry echo stops matching.
+ *
+ * `:0:<path>` rather than the shorter `:<path>`. Both address stage 0 of
+ * `<path>` in the index, but only the explicit form addresses the path
+ * *literally*: `gitrevisions` defines `:<n>:<path>` for n ∈ 0..3 alongside
+ * `:<path>`, so under the short form a tracked path whose own name begins with
+ * `0:`…`3:` is read as "stage n of the rest of the name" instead. Measured
+ * (git 2.47.1, an index carrying both `0:notes.dat` and `notes.dat` — Git for
+ * Windows will not create such an entry, a Linux git will, and either index
+ * reads the same): `:0:notes.dat` came back as `notes.dat`'s blob, so a real
+ * `.aero` staged as `0:notes.dat` was sniffed on its neighbour's bytes,
+ * judged ordinary text and passed clean. That was the one fail-*open* path in
+ * this guard — every other shape it cannot read ends in a rejection.
+ * `:0:0:notes.dat` returns the right blob. The stage digit widens nothing
+ * else: measured on the same git, `:0:<path>` and `:<path>` agree for an
+ * ordinary blob, for a gitlink (both `missing` — a submodule's commit object
+ * is not in this repository's object database) and for a path absent from the
+ * index (both `missing`).
+ *
+ * Exactly one reinterpretation survives behind `:0:`, and it is named here so
+ * the next reader does not have to rediscover it: inside the `:<n>:<path>`
+ * branch git still runs `resolve_relative_path` over the remainder, so a path
+ * starting `./` or `../` is re-read relative to the command's prefix, and a
+ * `../` that climbs out of the worktree makes git `die()` — killing the
+ * `cat-file` process outright rather than answering `missing`. Not reachable
+ * from this guard: git's `verify_path` refuses `.` and `..` as path components
+ * when an entry enters the index, so `git ls-files` never emits such a path,
+ * and the only other source of batch keys — `manifestPathFor` — appends a
+ * constant suffix to a prefix of an index path. If it ever did happen, the
+ * `die()` makes `execFileSync` throw, the caller catches it and the run exits
+ * 1; the residual risk is a loud failure, not a silent pass.
+ */
+const BATCH_SPEC_PREFIX = ':0:'
+
+/**
+ * Builds the stdin payload for `git cat-file --batch`, one `:0:path` object
+ * spec per line (see `BATCH_SPEC_PREFIX` for why the stage digit is spelled
+ * out) — that addresses stage 0 of `path` in the **index**, i.e. what would be
+ * committed right now, matching this guard's job of judging staged content
+ * rather than the working tree. Verified against git 2.47.1: a query for a
+ * path absent from the index echoes the literal query text back — prefix
+ * included, `:0:path missing` — which is what makes per-line correlation in
+ * `parseCatFileBatch` reliable even for paths that turn out not to exist.
  *
  * Callers are required to have already run every path through
  * `classifyIndexedPaths` and excluded whatever landed in its `unsafe`
@@ -339,13 +480,14 @@ export function buildBatchRequest(paths) {
             '`unsafePathVerdict`), never pass them here.',
         )
       }
-      return `:${path}\n`
+      return `${BATCH_SPEC_PREFIX}${path}\n`
     })
     .join('')
 }
 
 /**
- * @typedef {{ status: 'ok', content: Buffer } | { status: 'missing' }} BatchEntry
+ * @typedef {{ status: 'ok', content: Buffer } | { status: 'missing' }
+ *   | { status: 'unparsed', header: string }} BatchEntry
  */
 
 /**
@@ -378,11 +520,12 @@ export function buildBatchRequest(paths) {
  * contain `\n` is read whole.
  *
  * @param {Buffer} buffer Raw stdout of `git cat-file --batch`.
- * @param {readonly string[]} keys The `:path` query strings, in request order
- *   (without the leading `:` — this function adds it back to compare against
- *   git's missing-entry echo). Every key must already have been proven safe
- *   by `buildBatchRequest` — see that function's doc.
- * @returns {Map<string, BatchEntry>} Keyed by the plain path (no leading `:`).
+ * @param {readonly string[]} keys The queried paths, in request order (plain
+ *   paths — this function prepends `BATCH_SPEC_PREFIX` itself to compare
+ *   against git's missing-entry echo, which quotes the whole spec back). Every
+ *   key must already have been proven safe by `buildBatchRequest` — see that
+ *   function's doc.
+ * @returns {Map<string, BatchEntry>} Keyed by the plain path (no spec prefix).
  * @see buildBatchRequest
  */
 export function parseCatFileBatch(buffer, keys) {
@@ -398,19 +541,51 @@ export function parseCatFileBatch(buffer, keys) {
           '— git exited early or the response was truncated.',
       )
     }
-    const header = buffer.toString('latin1', offset, headerEnd)
+    const headerLine = buffer.subarray(offset, headerEnd)
+    const header = headerLine.toString('latin1')
     offset = headerEnd + 1
 
-    if (header === `:${key} missing`) {
+    // The `missing` sentinel is compared on **bytes**, not on decoded text.
+    // git echoes the query line back byte for byte before ` missing`
+    // (measured, git 2.47.1: `:0:lagu-ké\xc3\xa7.aero` comes back as those same
+    // UTF-8 bytes), and `key` is a JS string that `check-fixture-content.js`
+    // decoded from git's own UTF-8 `ls-files` output and that Node re-encoded
+    // as UTF-8 on the way into stdin — so the echo is UTF-8 and the key is a
+    // string. Comparing `header === BATCH_SPEC_PREFIX + key + ' missing'`
+    // compared those two across encodings: the latin1 decode turns every
+    // non-ASCII path into mojibake that can never match, which dropped such a
+    // path into the header-regex branch below, where it also could not match
+    // (the line starts with `:`). The latin1 decode itself stays — it is a
+    // lossless byte↔char mapping, which is what keeps the `\S+`/`\d+` framing
+    // fields and the diagnostic string faithful for a line that is not text at
+    // all. The prefix is the same constant `buildBatchRequest` wrote, so the
+    // echo cannot stop matching while the two agree.
+    if (
+      header.endsWith(' missing') &&
+      headerLine.equals(Buffer.from(`${BATCH_SPEC_PREFIX}${key} missing`, 'utf8'))
+    ) {
       results.set(key, { status: 'missing' })
       continue
     }
 
     const match = /^([0-9a-f]{4,64}) (\S+) (\d+)$/.exec(header)
     if (!match) {
-      throw new Error(
-        `fixture content guard: cat-file batch header for "${key}" did not parse: "${header}"`,
-      )
+      // Deliberately not a throw. A response line that is neither an object
+      // header nor this key's `missing` echo is still exactly *one* entry on
+      // the wire — `--batch` answers a query line with either
+      // `<oid> <type> <size>\n` plus content, or a single line (`missing`,
+      // `ambiguous`) — so `offset` already points at the next entry and every
+      // remaining key can still be judged. Throwing here meant one odd path
+      // (a name whose index bytes are not valid UTF-8, say) cost the
+      // repository the verdict on every other path, because the caller
+      // returns 1 before `identifyCandidates` runs even once. This is not a
+      // softening: the entry is non-`ok`, so `identifyCandidates` puts the
+      // path in `unreadable` and `summariseRun` fails the run on it. Framing
+      // damage that genuinely desynchronises the stream is still a throw —
+      // that is what the two size/trailing-newline checks below catch, and
+      // they are where drift actually surfaces.
+      results.set(key, { status: 'unparsed', header })
+      continue
     }
     const size = Number(match[3])
     const content = buffer.subarray(offset, offset + size)
@@ -447,8 +622,10 @@ export function parseCatFileBatch(buffer, keys) {
  * `classifyIndexedPaths`) require a manifest declaration, given their staged
  * content. A path with a declared extension is always a candidate — no
  * content needed. A path without one is a candidate only when its content
- * sniffs as media; a text source file, a JSON config, a markdown doc, none
- * of that.
+ * sniffs as media (`sniffMediaKind`) or parses as an Appendix C session
+ * document (`looksLikeAeroSession`, ADR-0030 — this is what catches a real
+ * `.aero` renamed `service.dat`); a text source file, an ordinary JSON
+ * config, a markdown doc, none of that.
  *
  * @param {readonly string[]} paths
  * @param {ReadonlyMap<string, BatchEntry>} contentByPath Keyed exactly as
@@ -492,7 +669,16 @@ export function identifyCandidates(paths, contentByPath) {
     }
 
     const kind = sniffMediaKind(entry.content)
-    if (kind) candidates.push({ path, reason: `content:${kind}` })
+    if (kind) {
+      candidates.push({ path, reason: `content:${kind}` })
+      continue
+    }
+    // The renamed-`.aero` case (ADR-0030): no declared extension, no binary
+    // magic number, but the Appendix C `kind` sentinel at the top level of a
+    // parseable JSON document. See `looksLikeAeroSession`.
+    if (looksLikeAeroSession(entry.content)) {
+      candidates.push({ path, reason: 'content:aero-session' })
+    }
   }
 
   return { candidates, unreadable }
@@ -526,6 +712,45 @@ export function identifyAllowlistedExtensionCandidates(allowlistedPaths) {
     if (hasDeclaredExtension(path)) candidates.push({ path, reason: 'extension' })
   }
   return candidates
+}
+
+/**
+ * The manifest paths a set of candidates will be judged against — one per
+ * distinct `fixtures/` root, candidates with no such root skipped (they are
+ * rejected by `evaluateCandidate` without a manifest ever being consulted).
+ *
+ * Exists because `evaluateCandidate` looks its manifest up in the *same*
+ * content map the caller fetched, and the caller's natural fetch list is
+ * `classifyIndexedPaths(...).toInspect` — which by construction excludes
+ * everything under `ALLOWLISTED_PREFIXES`. A candidate found by
+ * `identifyAllowlistedExtensionCandidates` therefore has its manifest under an
+ * allowlisted prefix too (`src-tauri/icons/fixtures/x.aero` →
+ * `src-tauri/icons/fixtures/fixtures.manifest.json`), so the lookup missed
+ * every time and the verdict read `"…" is not in the index — create it and
+ * declare this file before staging` for a manifest sitting right there in the
+ * index. Fail-closed, so nothing unsafe passed — but it told the developer to
+ * create a file they had already created, with no way out of the loop. The
+ * caller feeds this function's output into the same `git cat-file --batch`
+ * request so the manifest is actually present to be read. A manifest that
+ * genuinely is absent still comes back `missing` and still produces that same
+ * verdict, which is then true.
+ *
+ * @param {readonly Candidate[]} candidates
+ * @returns {string[]} Distinct manifest paths, in first-seen order.
+ */
+export function manifestPathsForCandidates(candidates) {
+  /** @type {string[]} */
+  const manifestPaths = []
+  const seen = new Set()
+  for (const candidate of candidates) {
+    const fixturesRoot = findFixturesRoot(candidate.path)
+    if (fixturesRoot === null) continue
+    const manifestPath = manifestPathFor(fixturesRoot)
+    if (seen.has(manifestPath)) continue
+    seen.add(manifestPath)
+    manifestPaths.push(manifestPath)
+  }
+  return manifestPaths
 }
 
 /**
@@ -618,11 +843,26 @@ export function evaluateManifestEntry(manifestText, relPath) {
  * unconditionally, which is what closes `git add -f` landing a real `.aero`
  * (or a real photo) anywhere else in the tree.
  *
+ * What does change with the conflict case is the *reason*, not the verdict.
+ * A conflict that touches only `fixtures.manifest.json` leaves the fixtures
+ * themselves at stage 0, so they are still candidates — but their manifest has
+ * no stage 0 to read, is filtered out of the batch request with every other
+ * unmerged path, and so came back absent. The verdict was right and its
+ * sentence was not: "is not in the index — create it" for a file sitting in
+ * the index at stages 1/2/3, which is the loop `manifestPathsForCandidates`
+ * already had to remove once. `unmergedPaths` is what lets this say the true
+ * cause instead; without it, this function cannot tell "absent" from
+ * "conflicted" (see `isUnmergedStage` on why a guard that misnames the cause
+ * is the guard people bypass).
+ *
  * @param {Candidate} candidate
  * @param {ReadonlyMap<string, BatchEntry>} contentByPath
+ * @param {ReadonlySet<string>} [unmergedPaths] Paths `isUnmergedStage` flagged,
+ *   as the caller collected them. Optional: omitting it costs only the
+ *   less precise sentence above, never a pass.
  * @returns {CandidateVerdict}
  */
-export function evaluateCandidate(candidate, contentByPath) {
+export function evaluateCandidate(candidate, contentByPath, unmergedPaths) {
   const fixturesRoot = findFixturesRoot(candidate.path)
   if (fixturesRoot === null) {
     return {
@@ -637,6 +877,18 @@ export function evaluateCandidate(candidate, contentByPath) {
   const manifestPath = manifestPathFor(fixturesRoot)
   const manifestEntry = contentByPath.get(manifestPath)
   if (!manifestEntry || manifestEntry.status !== 'ok') {
+    if (unmergedPaths?.has(manifestPath)) {
+      return {
+        path: candidate.path,
+        ok: false,
+        reason:
+          `"${manifestPath}" is itself in an unresolved merge conflict (git index stages ` +
+          '1/2/3, no stage 0), so the declaration this file needs cannot be read. It is in the ' +
+          'index at stage 1/2/3 — resolve the conflict and `git add` the manifest (a ' +
+          'delete/modify conflict may resolve to no manifest at all, which this file then has ' +
+          'to be moved or unstaged for), and this file is checked normally.',
+      }
+    }
     return {
       path: candidate.path,
       ok: false,
@@ -702,23 +954,90 @@ export function isGitlinkMode(mode) {
  * `breaksBatchLineProtocol`/`classifyIndexedPaths` downstream, not this
  * function, whose job is to refuse to act on that later.
  *
+ * The stage field is returned rather than discarded because it is the only
+ * signal distinguishing an ordinary entry from an unresolved merge conflict —
+ * see `isUnmergedStage` for why that distinction has to reach the caller.
+ *
  * @param {string} record One record, already split on NUL and non-empty.
- * @returns {{ mode: string, path: string } | null} `null` if `record` does
- *   not match the expected shape (defensive only — every record
+ * @returns {{ mode: string, stage: string, path: string } | null} `null` if
+ *   `record` does not match the expected shape (defensive only — every record
  *   `git ls-files -z -s` emits matches it; a stray malformed record is
  *   treated as a hard failure by the caller, not silently dropped).
  */
 export function parseLsFilesEntry(record) {
-  const match = /^([0-7]+) [0-9a-f]{4,64} \d+\t([\s\S]*)$/.exec(record)
+  const match = /^([0-7]+) [0-9a-f]{4,64} (\d+)\t([\s\S]*)$/.exec(record)
   if (!match) return null
-  const [, mode, path] = match
+  const [, mode, stage, path] = match
   // Unreachable in practice — a successful match against this pattern always
-  // populates both groups (the second may be an empty string, never
+  // populates all three groups (the last may be an empty string, never
   // `undefined`) — but `noUncheckedIndexedAccess` cannot see that, and
   // narrowing explicitly here is cheaper than an `as` cast that would hide a
   // real regression if the pattern above ever changed.
-  if (mode === undefined || path === undefined) return null
-  return { mode, path }
+  if (mode === undefined || stage === undefined || path === undefined) return null
+  return { mode, stage, path }
+}
+
+/**
+ * @param {string} stage Third field of a `git ls-files -z -s` record (see
+ *   `parseLsFilesEntry`).
+ * @returns {boolean} Whether `stage` marks an unresolved merge conflict.
+ *
+ * A resolved index entry is stage `0`. An unresolved one has no stage 0 at
+ * all: git emits three records for it — stage 1 (base), 2 (ours), 3 (theirs)
+ * — all sharing one path. `git cat-file --batch` on `:0:path` (the form
+ * `buildBatchRequest` writes — see `BATCH_SPEC_PREFIX`) addresses stage 0
+ * specifically, so every one of those three queries comes back `missing`, and
+ * the path lands in `unreadable` three times over. That failed `pretest`, and
+ * therefore every `npm test`, for the whole duration of a merge conflict,
+ * blaming "index changed mid-scan?" — a cause that has nothing to do with it.
+ * A guard that blocks work while accusing the wrong thing is the guard people
+ * learn to bypass, so the caller filters these out before the batch request
+ * and judges them with `unmergedPathVerdicts` instead.
+ */
+export function isUnmergedStage(stage) {
+  return stage !== '0'
+}
+
+/**
+ * Verdicts for the paths `isUnmergedStage` picked out — deduplicated (a
+ * conflict contributes the same path once per stage) and narrowed to the
+ * paths this guard can still say something true about without content.
+ *
+ * Only `hasDeclaredExtension` paths get a verdict. That is a deliberate line,
+ * not an oversight: an unresolved conflict on `README.md` or a `.png` is
+ * ordinary work in progress, and failing `npm test` for it is exactly the
+ * over-blocking this function exists to stop. The safety argument is that git
+ * refuses to commit while any entry is unmerged, so no conflicted content can
+ * reach a commit without first passing through stage 0 — where this guard
+ * reads it in full on the next run, sniffing included. A conflicted
+ * `.aero`/`.aerotpl` is different only because ADR-0023 makes it a candidate
+ * on its *name*, which is knowable right now with no content at all, so
+ * staying silent about it would be silence about something already decided.
+ *
+ * @param {readonly string[]} paths Paths of records whose stage
+ *   `isUnmergedStage` flagged, in listing order.
+ * @returns {CandidateVerdict[]}
+ */
+export function unmergedPathVerdicts(paths) {
+  /** @type {CandidateVerdict[]} */
+  const verdicts = []
+  const seen = new Set()
+  for (const path of paths) {
+    if (seen.has(path)) continue
+    seen.add(path)
+    if (!hasDeclaredExtension(path)) continue
+    verdicts.push({
+      path,
+      ok: false,
+      reason:
+        'this path is in an unresolved merge conflict (git index stages 1/2/3, no stage 0), ' +
+        'so there is no staged content for this guard to read — and ADR-0023 makes a ' +
+        '.aero/.aerotpl a candidate by name regardless. Resolve the conflict and `git add` ' +
+        'the result; it is then checked normally. This does not block other conflicted ' +
+        'paths, only this one.',
+    })
+  }
+  return verdicts
 }
 
 /**
@@ -744,6 +1063,15 @@ export function parseLsFilesEntry(record) {
  * today, and the day one is proposed it needs a real, reviewed answer for
  * how this guard treats it, not silent passage through a checker that
  * assumed submodules would never exist.
+ *
+ * "Unconditionally" includes an unmerged gitlink — two branches pointing one
+ * submodule at two different commits, which git records as stages 2 and 3 with
+ * no stage 0. `check-fixture-content.js` therefore splits gitlinks out of the
+ * *full* index listing, before the unmerged split rather than after it; taking
+ * them from the stage-0 half meant a conflicted pointer reached neither this
+ * verdict nor `unmergedPathVerdicts` (which judges by name, and a submodule
+ * path is not a `.aero`), and so got no verdict at all — the one gap this
+ * function exists to close, reopened by the ordering of two filters.
  *
  * @param {string} path
  * @returns {CandidateVerdict}
@@ -771,10 +1099,15 @@ export function gitlinkVerdict(path) {
  * boolean, because they are different findings about *this run* and not just
  * about the fixtures it found:
  *
- *   - `indexedCount === 0` never happens in a git repository (`.git` itself
- *     is never tracked) and would mean git could not be asked at all — see
- *     the script for how that is turned into a hard failure before this
- *     function is ever reached.
+ *   - An empty index never happens in a git repository (`.git` itself is
+ *     never tracked) and would mean git could not be asked at all. That is a
+ *     hard failure in the script, before this function is ever reached — and
+ *     it is *only* there: this function used to take an `indexedCount` (and
+ *     an `allowlistedCount`) it then never read, which read as though the
+ *     exit code below weighed them. It does not, and never did. A parameter
+ *     that looks like it participates in a decision and does not is worse
+ *     than no parameter, so both are gone; the script still reports those two
+ *     numbers from its own locals, where they are plainly just reporting.
  *   - Zero candidates is success **and** distinguishable from a run that
  *     never happened: `checkedCount` in the return value is the proof this
  *     scanned something, even when nothing needed a declaration. Compare
@@ -785,8 +1118,8 @@ export function gitlinkVerdict(path) {
  *     `violations` there are or are not — a candidate this guard could not
  *     actually verify must never be reported as clean by omission.
  *
- * @param {{ indexedCount: number, allowlistedCount: number,
- *   candidateVerdicts: readonly CandidateVerdict[], unreadable: readonly string[] }} run
+ * @param {{ candidateVerdicts: readonly CandidateVerdict[],
+ *   unreadable: readonly string[] }} run
  * @returns {{ exitCode: number, checkedCount: number, violationCount: number,
  *   unreadableCount: number }}
  */
