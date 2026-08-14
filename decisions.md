@@ -1132,3 +1132,150 @@ Empat varian `DbError` seluruhnya bermuara ke sini, termasuk dua yang sengaja di
 Bobotnya jujur: kandungan datanya bukan kredensial dan bukan data finansial, dan enkripsi at-rest yang kuncinya harus tersedia bagi aplikasi offline pada mesin yang sama memindahkan masalah alih-alih menyelesaikannya. Yang tidak dapat dibenarkan adalah **tidak menuliskannya**, karena keputusan diam tidak dapat ditinjau ulang saat asumsinya berubah.
 
 **Yang membatalkan keputusan ini.** Requirement mana pun yang menempatkan data pribadi jemaat — bukan sekadar isi ibadah — di dalam database yang sama.
+
+
+### ADR-0030 — `.aero` yang diganti nama **dapat** ditangkap lewat sentinel Appendix C; alasan penundaan versi pertama ADR ini keliru dan diganti
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-13 (direvisi total pada hari yang sama sesudah audit) |
+| Status | Diterima |
+| Terkait | SETUP-05 (auditor W1 siklus 1; audit siklus 3 temuan W3), [ADR-0023](decisions.md#adr-0023), FR-701, PRD Appendix C |
+
+**Masalahnya.** Guard menangkap berkas lewat dua pegangan: ekstensi terdaftar (`.aero`/`.aerotpl`) dan magic byte media (`sniffMediaKind`). `.aero` sungguhan yang di-*commit* bernama `service.dat` lolos keduanya.
+
+**Versi pertama ADR ini menerima celah itu dengan alasan yang tidak tahan uji, dan auditor membongkarnya.** Yang saya tulis: JSON tidak punya magic byte, jadi `sniffMediaKind` tidak dapat diperluas — "tidak ada yang bisa ditambahkan ke daftar itu"; satu-satunya jalan adalah pencocokan struktur terhadap skema yang belum ada, dengan biaya membaca setiap berkas teks. **Tiga bagiannya salah, dan ketiganya terverifikasi:**
+
+1. **Ada sentinel literal, dan PRD sudah mewajibkannya.** `docs/PRD.md:1467` (skema) dan `:1526` (contoh terkerja) sama-sama menuntut kunci tingkat-atas `"kind": "aeroworship.session"`. Itu string ASCII unik yang wajib hadir di setiap `.aero` sungguhan, apa pun namanya.
+2. **Skemanya sudah ada.** Appendix C lengkap di `docs/PRD.md:1460–1549`. Yang belum ada adalah implementasi Rust-nya, bukan skemanya — dan `kind`/`schema_version` justru dua kunci paling stabil di seluruh dokumen.
+3. **Argumen biaya salah.** Guard **sudah** membaca isi lengkap setiap berkas ter-track non-allowlist; `check-fixture-content.js:72–74` menyatakannya sendiri. Buffer-nya sudah di tangan saat `sniffMediaKind` dipanggil. Biaya tambahannya nol.
+
+Auditor juga menunjuk pegangan keempat yang tidak saya sebut: `findFixturesRoot` sudah mewajibkan deklarasi manifest bagi **setiap** path di bawah root `fixtures/`, tanpa peduli ekstensi maupun konten — yang justru menutup skenario yang saya sendiri sebut sebagai risiko utamanya ("seseorang menyalin berkas ibadah sungguhan ke `fixtures/`").
+
+**Keputusan.** Tambahkan deteksi sentinel Appendix C ke jalur pengendusan. Celah ini ditutup, bukan diterima.
+
+**Tetapi bukan sebagai pencocokan substring — dan ini bukan detail.** `docs/PRD.md` **ter-track** dan memuat literal `aeroworship.session` dua kali. `buffer.includes('aeroworship.session')` yang polos akan menandai PRD sebagai kandidat, menolaknya karena ia tak punya leluhur `fixtures/`, dan membuat `npm test` merah pada repo bersih. Perbaikan yang paling jelas karena itu **lebih lebar daripada kenyataan** — kelas cacat yang sama persis dengan yang ia perbaiki. Deteksinya wajib menuntut buffer yang **parse sebagai JSON** dengan `kind === 'aeroworship.session'`; PRD gugur di syarat pertama, `.aero` sungguhan lolos apa pun namanya.
+
+**Batas yang tetap terbuka sesudah perbaikan ini.** `.aero` yang **dienkripsi, dikompresi, atau sengaja dirusak** tetap tak terdeteksi, karena ia berhenti menjadi JSON. Itu penyelundupan berniat, dan tidak ada guard di lapisan ini yang menjawabnya — pertahanannya tinjauan manusia, sama seperti [ADR-0031](decisions.md#adr-0031).
+
+**Yang membatalkan keputusan ini.** Perubahan Appendix C yang menghapus atau mengganti nilai `kind`. Sentinel adalah kontrak; kalau ia bergerak, guard ikut buta.
+
+### ADR-0031 — Manifest membuktikan adanya klaim, bukan kebenarannya — dan verifikasinya hanya satu arah: berkas → manifest
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-13 (direvisi pada hari yang sama sesudah audit) |
+| Status | Diterima |
+| Terkait | SETUP-05 (auditor S1 siklus 1; audit siklus 3 temuan W4), [ADR-0023](decisions.md#adr-0023), [ADR-0030](decisions.md#adr-0030) |
+
+**Keputusan.** `fixtures.manifest.json` bekerja lewat **deklarasi diri**: `synthetic: true` menyatakan sebuah fixture dibuat-buat. Guard memverifikasi klaim itu **ada dan terbentuk benar**; ia tidak dapat, dan tidak berpura-pura dapat, memverifikasi bahwa isinya memang sintetis. Berkas ibadah sungguhan yang dideklarasikan `synthetic: true` akan lolos.
+
+**Koreksi atas versi pertama ADR ini.** Saya menulis bahwa guard juga memverifikasi deklarasi itu "menunjuk berkas yang benar-benar di-*stage*". **Tidak.** Verifikasi berjalan satu arah saja: `evaluateCandidate` berangkat dari path kandidat yang ditemukan di index, lalu mencari kuncinya di manifest. Tak ada satu baris pun yang mengiterasi `entries` untuk memeriksa arah sebaliknya. Manifest berisi `"hantu.aero": { synthetic: true, … }` tanpa berkas `hantu.aero` di mana pun **lolos tanpa keluhan**; entri yatim tidak pernah terdeteksi.
+
+Bahwa entri yatim tidak berbahaya — ia mendeklarasikan berkas yang tidak ada — tidak membuat klaim itu benar. Yang berbahaya adalah ADR yang menyatakan sebuah pemeriksaan berjalan padahal tidak, karena pembaca berikutnya akan bersandar padanya.
+
+**Dua klausul lain terverifikasi, dan salah satunya lebih kuat dari yang saya tulis.** "Ada": guard menuntut manifest hadir di **index**, bukan di working tree — manifest yang belum di-*stage* ditolak. "Terbentuk benar": JSON valid, root objek, `entries` objek, entri objek, `synthetic === true` literal, `purpose` ≥ 20 karakter sesudah `trim`. Batasnya: hanya subpohon yang dipakai yang divalidasi; entri lain di manifest yang sama tak pernah disentuh, dan manifest di `fixtures/` yang tak punya kandidat tak pernah diambil sama sekali.
+
+**Mengapa deklarasi diri tetap bernilai meski bisa dibohongi.** Ia memindahkan kelalaian menjadi pernyataan. Tanpa manifest, menaruh lirik sungguhan di `fixtures/` tak menuntut siapa pun mengatakan apa pun. Dengan manifest, orang yang sama harus **menuliskan klaim** ke berkas yang muncul di diff dan bertanda tangan di riwayat git. Kecelakaan berubah menjadi keputusan sadar, dan keputusan sadar bisa ditinjau — sebagian besar pelanggaran yang dikhawatirkan ADR-0023 adalah kecelakaan.
+
+**Konsekuensi yang harus diterima terang-terangan.** Kontrol ADR-0023 **bukan kontrol otomatis penuh**. Bagian otomatisnya menjamin tidak ada berkas berisiko masuk tanpa klaim; bagian manusianya — pembaca *review* yang melihat `synthetic: true` baru dan bertanya "sungguh?" — satu-satunya yang menilai kebenaran klaim. Yang benar dikatakan: **guard ini mencegah konten berisiko masuk tanpa klaim tertulis.**
+
+**Yang membatalkan keputusan ini.** `synthetic: true` keliru yang pernah lolos ke `main`, atau manifest yang tumbuh cukup besar sehingga entri yatim menjadi kebisingan yang menyamarkan entri sungguhan.
+
+### ADR-0032 — `maxBuffer` 64 MiB gagal-tertutup; yang mengalir lewatnya adalah **seluruh isi repo ter-track**, bukan hanya kandidat
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-13 (direvisi pada hari yang sama sesudah audit) |
+| Status | Diterima |
+| Terkait | SETUP-05 (auditor S2 siklus 1; audit siklus 3 temuan W2), [ADR-0023](decisions.md#adr-0023) |
+
+**Keputusan.** `check-fixture-content.js` menampung seluruh keluaran `git ls-files -z -s` dan `git cat-file --batch` di memori lewat `execFileSync` dengan `maxBuffer` 64 MiB (`:77,86`). Dipertahankan; tidak diubah menjadi streaming sekarang.
+
+**Koreksi atas versi pertama ADR ini.** Saya menulis bahwa yang mengalir lewat `--batch` "hanya konten kandidat". **Salah.** `toInspect` adalah **setiap** path ter-index yang bukan gitlink, bukan `unsafe`, dan bukan allowlist — isi lengkapnya ditarik ke satu Buffer, karena magic byte hanya bisa diendus dari byte yang sudah dibaca. Berkas itu menyatakannya sendiri di `:72–74`. Variabel penskalaannya bukan jumlah fixture melainkan **total isi repo ter-track dikurangi `src-tauri/icons/`**.
+
+**Konsekuensinya bukan salah kata, melainkan pemicu yang salah.** Versi pertama menetapkan pembatalnya sebagai "item pertama yang menambahkan fixture media besar". Dengan premis yang benar, pemicunya jauh lebih luas: berkas ter-track besar apa pun — `package-lock.json`, korpus Alkitab, aset apa pun — menghabiskan anggaran yang sama **tanpa satu fixture pun ada**. Pemicu lama tidak akan pernah menyala untuk penyebab yang paling mungkin.
+
+**Marginnya, diukur bukan dikira.** 64 berkas ter-track, total **0,8 MiB**. Terhadap 64 MiB itu sekitar 80×. Jarak itu nyata, dan itulah alasan penundaannya sah.
+
+**Klaim gagal-tertutup terverifikasi, dengan satu nuansa.** Auditor menelusurinya persis seperti diminta: tak ada `try`/`catch` yang menelan galat buffer menjadi jalur bersih. `git()` hanya menangkap untuk memperkaya pesan `ENOENT` lalu melempar ulang; kedua pemanggilnya menangkap dan `return 1`. Nuansanya: galat itu **memang ditangkap** — kalimat "exception, bukan laporan bersih" terlalu ringkas. Yang benar: ia diubah menjadi **exit 1 bercetak pesan**, bukan menjadi laporan bersih. Kelas hasilnya sama, dan itulah yang menentukan sebuah batas boleh ditunda: kalau kegagalannya berupa pemotongan senyap, ia wajib diperbaiki hari ini.
+
+**Yang membatalkan keputusan ini.** Berkas ter-track besar apa pun yang membuat total isi repo mendekati anggaran — bukan khusus fixture. Perbaikannya sudah jelas bentuknya: aliri `--batch` lewat stdio alih-alih menampungnya, dan korelasikan respons sambil membaca.
+
+### ADR-0033 — Symlink lolos; path non-UTF-8 **menggugurkan seluruh run**, bukan sekadar dirinya sendiri
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-13 (direvisi pada hari yang sama sesudah audit) |
+| Status | Diterima |
+| Terkait | SETUP-05 (auditor S3 siklus 1; audit siklus 3 temuan W1 dan verifikasi ADR-0033), [ADR-0023](decisions.md#adr-0023), [ADR-0024](decisions.md#adr-0024) |
+
+**Symlink (mode `120000`) — terverifikasi seperti tertulis semula.** Hanya `160000` yang diperlakukan khusus; symlink dibaca sebagai blob biasa yang isinya **teks path tujuannya**. Maka `media/photo.png` yang sebenarnya symlink ke berkas ibadah sungguhan tidak cocok magic byte mana pun dan lolos. Yang tidak lolos: symlink berekstensi terdaftar tetap wajib punya deklarasi manifest, sebab cek ekstensi tak melihat konten sama sekali. Bobotnya rendah karena isi yang "diselundupkan" tidak ikut ter-*commit* — hanya path tujuannya yang tersimpan sebagai objek git.
+
+**Path non-UTF-8 — lokasi benar, mekanisme salah, dan konsekuensinya lebih berat.** Saya menulis bahwa path itu jatuh ke `unreadable` berkat perbaikan W-new-1, sehingga gagal-tertutup dan yang kurang hanya kualitas pesan galat. **Ia tidak pernah sampai ke sana.** `parseCatFileBatch` mendekode header sebagai `latin1` (pilihan yang benar untuk melindungi framing biner) lalu membandingkannya dengan `` `:${key} missing` `` yang ber-UTF-8. Untuk path non-ASCII, gema byte-mentah git menjadi mojibake yang tak pernah `===`; eksekusi jatuh ke regex header yang juga tak cocok, dan fungsi **melempar**. Pemanggilnya menangkap dan `return 1` — sebelum `identifyCandidates` berjalan untuk **satu path pun**.
+
+**Jadi yang kurang bukan kualitas diagnostik, melainkan cakupan:** satu path bermasalah menggugurkan penilaian atas seluruh path lain. Arahnya tetap gagal-tertutup, dan karena itu ini bukan celah keamanan — tetapi mekanisme yang saya kreditkan tidak pernah menyala, dan W-new-1 tidak berperan sama sekali.
+
+**Keputusan.** Bandingkan sentinel `missing` pada level byte, atau dekode header sebagai UTF-8 — perbaikan satu baris yang mengembalikan perilaku per-path yang W-new-1 rancang. **Ini diperbaiki, tidak ditunda.** Symlink tetap ditunda: AeroWorship tidak memakai symlink di mana pun, dan menanganinya berarti menambah jalur kode yang tak dapat diuji terhadap kebutuhan nyata mana pun.
+
+**Yang membatalkan penundaan symlink.** Symlink pertama yang di-*stage* dengan sengaja.
+
+### ADR-0034 — NFR-33 dipenuhi lewat `ts-rs`, dan ekspornya **test-time**; janji "build time" PRD §6.4 tidak dapat ditepati oleh alat yang PRD §6.12 namai
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-13 |
+| Status | Diterima — dengan satu pertentangan PRD yang menunggu keputusan pengguna |
+| Terkait | SETUP-05 (NFR-33), PRD §6.4 (baris 585), PRD §6.12 (baris 814), NFR-16 |
+
+**Keputusan.** Kontrak tipe Rust→TypeScript dibangkitkan `ts-rs` 12.0.1, dipasang sebagai **dev-dependency** `aeroworship-core`.
+
+**Pertentangan PRD, dinyatakan bukan dibulatkan.** PRD §6.4 menjanjikan tipe "generated into TypeScript **at build time**". `ts-rs` tidak bisa, dan itu bukan penilaian kami melainkan kalimat penulisnya sendiri di `ts-rs-12.0.1/src/lib.rs:168`: *"bindings \_\_cannot\_\_ be exported during compile time"* — karena makro prosedural Rust dievaluasi sebelum tahap kompilasi lain. `#[ts(export)]` mengembang menjadi `#[test]`. Terukur di repo ini: test `db::migrations::export_bindings_migration` muncul di `cargo test`, sementara `cargo build` dan `cargo clippy` tidak menghasilkan satu berkas pun.
+
+Jadi alat yang PRD sendiri namai lebih dulu tidak dapat memenuhi janji yang PRD tulis. **`docs/PRD.md` tidak diubah** — PRD hanya berubah lewat keputusan pengguna ([H4](PROGRESS.md)). Yang tidak boleh terjadi adalah menyebut `cargo test` sebagai "build time" dan menganggap perkara selesai; itu klaim yang lebih lebar daripada kenyataan, kelas cacat yang [ADR-0020](decisions.md#adr-0020)/[ADR-0021](decisions.md#adr-0021) buktikan mahal di repo ini.
+
+**Pilihan `ts-rs` atas `specta`, dalam kalimat yang bisa dibantah.** `specta` menagih pembayaran di **biner yang dikirim** untuk sesuatu yang hanya dibutuhkan saat generate; `ts-rs` tidak. Ekspor `specta` adalah pemanggilan fungsi runtime, bukan `#[test]` yang dibangkitkan, sehingga `derive(Type)` harus menjadi dependency **normal** dan masuk graf biner rilis — menekan NFR-16. `tauri-specta` mengambil kontraknya dari `#[tauri::command]`, yang **nol** di repo ini hari ini, jadi ia belum bisa membuktikan apa pun. `specta` v2 juga masih `2.0.0-rc.25`.
+
+**Bantahan yang diterima di muka:** kalau kelak katalog Appendix D memang ingin dibangkitkan otomatis dari `#[tauri::command]`, `tauri-specta` mengerjakan yang `ts-rs` tidak bisa, dan biaya biner di atas menjadi harga yang wajar. Keputusan ini tidak mengunci pintu itu.
+
+**NFR-16 terverifikasi, bukan diasumsikan.** `cargo tree -p aeroworship --edges normal` memberi **nol** `ts-rs`. Tiga crate yang masuk `Cargo.lock` (`ts-rs`, `ts-rs-macros`, `termcolor`) seluruhnya dev-only; nol byte masuk installer.
+
+**Yang membatalkan keputusan ini.** Perintah `#[tauri::command]` pertama yang benar-benar mendarat, yang membuat perbandingan dengan `tauri-specta` menjadi nyata alih-alih hipotetis.
+
+### ADR-0035 — Gate anti-drift dipasang di `pretypecheck`; `npm run typecheck` karena itu menuntut toolchain Rust, dan `cargo test` menulis ke berkas ter-track
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-13 |
+| Status | Diterima |
+| Terkait | SETUP-05 (NFR-33), [ADR-0034](decisions.md#adr-0034), [ADR-0020](decisions.md#adr-0020) |
+
+**Keputusan.** `npm run bindings:check` membangkitkan ulang kontrak ke direktori temp, membandingkannya byte-per-byte dengan berkas ter-*commit*, dan gagal keras bila berbeda. Ia dipasang sebagai `pretypecheck`, bukan `pretest`.
+
+**Mengapa `pretypecheck` dan bukan `pretest`.** Binding basi **tidak** membuat `vue-tsc` merah — ia membuatnya **hijau terhadap kontrak kemarin**. Gate yang mengonsumsi berkas ini adalah `typecheck`, jadi di situlah kesegarannya harus dijamin. `npm test` sengaja dibiarkan bersih dari cargo.
+
+**Harga yang harus diterima terang-terangan.** `npm run typecheck` kini menuntut toolchain Rust terpasang. Kontributor yang hanya menyentuh frontend tidak lagi bisa menjalankan gate tipe tanpa `cargo`. Itu biaya nyata, dan diterima karena alternatifnya — kontrak yang boleh basi selama `vue-tsc` hijau — meniadakan seluruh maksud NFR-33.
+
+**Efek samping yang lebih halus, dan jendela buta yang ditimbulkannya.** `TS_RS_EXPORT_DIR` disetel di `.cargo/config.toml` akar repo, sehingga `cargo test --workspace` biasa **menulis ke `src/shared/bindings/`** yang ter-track. Akibatnya working tree menyembuhkan dirinya sendiri: mengubah tipe Rust lalu menjalankan `cargo test` memperbarui `.ts` diam-diam, dan `bindings:check` sesudahnya **hijau** karena ia membandingkan terhadap berkas yang baru saja diperbarui. Drift tidak lagi muncul sebagai gate merah melainkan sebagai berkas termodifikasi di `git status`.
+
+Diterima, karena keadaan akhir yang diinginkan justru itu — kedua berkas berubah bersama dalam satu perubahan. Yang tersisa sebagai risiko adalah **commit selektif**: seseorang meng-*commit* perubahan Rust tanpa `.ts`-nya. Backstop normalnya adalah CI, dan **repo ini belum punya konfigurasi CI sama sekali** — jadi hari ini backstop-nya adalah tinjauan manusia atas diff. Itu harus dikatakan, bukan diasumsikan.
+
+**Dua sifat gate yang diukur, bukan dianggap.** (1) Regenerasi masuk temp dir, jadi gate tidak diam-diam memperbaiki drift yang seharusnya ia laporkan — berkas ter-*commit* terbukti utuh saat merah, dan dikonfirmasi coordinator lewat `git status` sesudah menjalankannya. (2) `cargo test <filter>` yang tidak cocok apa pun **exit 0** (terverifikasi: `zzz_no_such_test` → 0), sehingga "generator menghasilkan nol berkas" dijadikan kegagalan eksplisit. Tanpa klausa itu, menghapus `#[ts(export)]` terakhir akan mematikan seluruh mekanisme dengan gate tetap hijau — persis kelas ADR-0020.
+
+**Yang membatalkan keputusan ini.** Konfigurasi CI pertama, yang memindahkan backstop commit-selektif dari manusia ke mesin dan boleh mengubah perhitungan di atas.
+
+### ADR-0036 — `Migration` dibangkitkan sebagai **bukti mekanisme**, bukan sebagai awal katalog Appendix D
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-13 |
+| Status | Diterima |
+| Terkait | SETUP-05 (NFR-33), [ADR-0034](decisions.md#adr-0034), PRD Appendix D |
+
+**Keputusan.** Satu-satunya tipe yang diekspor hari ini adalah `db::Migration`. Ia dipilih sebagai tipe nyata terkecil yang membuktikan pipeline bekerja — tiga field primitif, tanpa tipe eksternal, tanpa atribut serde yang perlu ditafsirkan.
+
+**Mengapa bukan `DbError`, dan mengapa `AppError` tidak diciptakan.** `DbError` bukan `Serialize`, dan varian `Sqlite`-nya membungkus `rusqlite::Error` yang tak punya proyeksi TS sama sekali. Appendix D menyatakan setiap perintah mengembalikan `Result<T, AppError>`, tetapi `AppError` belum ada — dan mengarang bentuk kontrak galat aplikasi supaya ada sesuatu untuk dibangkitkan adalah pekerjaan item FR, bukan item ini. Mekanisme yang terbukti pada satu tipe nyata lebih bernilai daripada kontrak karangan yang harus dibongkar bulan depan.
+
+**`Migration` bukan tipe kawat, dan tidak boleh menjadi tipe kawat.** Ia internal crate `core`. Kehadirannya di `src/shared/bindings/` adalah artefak bukti, bukan pernyataan bahwa frontend boleh memakainya. Komentar di atas struct-nya memuat instruksi pembongkarannya: **saat tipe kawat pertama mendarat di `models/`, kedua atribut `cfg_attr` dilepas dan `Migration.ts` dihapus dalam perubahan yang sama.**
+
+**Yang membatalkan keputusan ini.** Tipe kawat pertama itu sendiri. Sejak ia ada, mempertahankan `Migration` di direktori binding berhenti menjadi bukti dan mulai menjadi kebisingan yang menyamarkan kontrak sungguhan.

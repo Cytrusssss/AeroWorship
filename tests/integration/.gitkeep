@@ -1,0 +1,32 @@
+# Command-level tests (PRD §6.13): exercise a Tauri command handler end to
+# end — deserialise input, call into `aeroworship-core`, assert on the
+# returned/emitted shape — as opposed to `tests/unit/`, which tests a pure
+# function directly with no `tauri` runtime involved, and `tests/perf/`,
+# which asserts on latency/memory rather than correctness.
+#
+# Nothing lives here yet because no FR has shipped a command. The first item
+# under M1 (FR-1xx) that adds a `#[tauri::command]` owns the first file here.
+#
+# Likely shape, not yet decided by any item: a `tauri::test` mock app per
+# PRD §6.3's command boundary ("deserialise, call core, emit or return"), so
+# these tests catch a command that skips core and reimplements logic inline —
+# the ADR-0008 violation unit tests on `aeroworship-core` alone cannot see,
+# because they never invoke the command layer at all.
+#
+# What does NOT belong here:
+#   - Parsing, splitting, serialisation, path resolution — correctness-critical
+#     logic that PRD §6.1/§6.3 require to live in `aeroworship-core` as pure
+#     functions, tested in `tests/unit/` (or the crate's own `tests/`, Cargo
+#     convention) without a `tauri` runtime.
+#   - Timing, memory or soak assertions (NFR-01…NFR-07) — `tests/perf/`.
+#   - Real congregation content in any `fixtures/` subdirectory this suite
+#     creates. `.gitignore` unignores `**/fixtures/**/*.aero` and
+#     `*.aerotpl` specifically so NFR-15/NFR-28 fixtures can live in the repo,
+#     and ADR-0023's staged-content guard (`scripts/check-fixture-content.js`,
+#     wired into `npm test`) rejects any `.aero`/`.aerotpl`/media file staged
+#     under a `fixtures/` directory that is not declared synthetic in a
+#     `fixtures.manifest.json` sitting at that directory's root — see that
+#     script's module doc before adding the first fixture here, in particular
+#     for FR-705's relink bundles (`fixtures/relink-a/media/`,
+#     `fixtures/relink-b/media/`), which are exactly the case the guard exists
+#     to catch.

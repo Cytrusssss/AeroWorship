@@ -1,0 +1,45 @@
+# Performance/reliability harnesses (PRD §6.13): NFR-01…NFR-07 (standby RAM,
+# slide-transition latency, search latency, cold start, idle CPU, soak RSS
+# growth) and the GATE-G1…G9 measurements in PRD §7.1 that read off them.
+# Assert on latency, memory or CPU, not on correctness — a harness that
+# checks a returned value's *shape* belongs in `tests/unit/` or
+# `tests/integration/` instead, even if it happens to time the call while
+# it's there.
+#
+# Nothing lives here yet; no FR has shipped the window/display/search
+# machinery these harnesses measure. G10 (core coverage ≥80%) is not measured
+# here either — it's a coverage-tool concern over `tests/unit/` and the
+# crate's own `#[test]`s, not a harness of its own.
+#
+# --- The release-profile trap (ADR-0019) — read before writing the first one ---
+#
+# `src-tauri/src/lib.rs` carries a `compile_error!` that rejects *any* release
+# profile build without Tauri's `custom-protocol` feature (ADR-0016/0018),
+# and `cargo test --release`/`cargo bench` do not carry that feature by
+# default. A perf harness is naturally run in `--release` — that's the point
+# of measuring it — so the bare command a reasonable person reaches for fails
+# to compile, with a `compile_error!` message that already names the fix.
+# This file, and the two `npm` scripts below, are the "one place" ADR-0019
+# requires that command to live, rather than everyone rediscovering it from
+# the compiler message:
+#
+#   npm run test:perf:shell   →  cargo test --release -p aeroworship
+#                                 --features tauri/custom-protocol
+#                                 (harness touches src-tauri/src/**, i.e. the
+#                                 tauri shell crate — window/display/event code)
+#
+#   npm run test:perf:core    →  cargo build --release -p aeroworship-core
+#                                 (harness touches only aeroworship-core —
+#                                 parsing/splitting/serialisation/search. This
+#                                 crate never depends on `tauri` (ADR-0008), so
+#                                 the guard above cannot see it: unaffected by
+#                                 construction, not because of a workaround.)
+#
+# Pick the one that matches which crate the harness under test lives in —
+# most of NFR-02/NFR-03 (slide transition, search) should land in
+# `aeroworship-core` and use the second form; NFR-01/NFR-04/NFR-05/NFR-12
+# (RAM, cold start, idle CPU, soak) necessarily touch the running Tauri
+# process and use the first.
+#
+# What does NOT belong here: fixtures containing real congregation content —
+# same ADR-0023 guard and rule as `tests/integration/.gitkeep` describes.

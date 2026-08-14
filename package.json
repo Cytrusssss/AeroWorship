@@ -10,10 +10,16 @@
     "build": "vite build",
     "postbuild": "node scripts/check-dist-html.js",
     "tauri": "tauri",
+    "pretest": "node scripts/check-fixture-content.js",
     "test": "vitest run",
+    "test:perf:shell": "cargo test --release --manifest-path src-tauri/Cargo.toml -p aeroworship --features tauri/custom-protocol",
+    "test:perf:core": "cargo build --release --manifest-path src-tauri/Cargo.toml -p aeroworship-core",
     "lint": "eslint .",
     "postlint": "prettier --check .",
     "format": "prettier --write .",
+    "bindings:generate": "cargo test --workspace --manifest-path src-tauri/Cargo.toml export_bindings",
+    "bindings:check": "node scripts/check-bindings.js",
+    "pretypecheck": "npm run bindings:check",
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {

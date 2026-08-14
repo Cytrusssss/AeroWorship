@@ -33,3 +33,24 @@ publish.workspace = true
 # Statement caching is worth revisiting when FR-2xx measures its query paths;
 # until then it is weight in a 15 MB installer budget (NFR-16).
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+
+[dev-dependencies]
+# The Rust→TypeScript generator behind NFR-33.
+#
+# A **dev**-dependency, not a normal one, and that is the whole reason this
+# arrangement is affordable: `ts-rs` drags in `thiserror` plus the usual
+# `syn`/`quote`/`proc-macro2` macro stack, and this crate deliberately refused
+# `thiserror` for four `Display` impls to protect the 15 MB installer budget
+# (see `db/error.rs`). Taking it as a dev-dependency means the derive is
+# compiled only into the `cfg(test)` build of this lib — `#[cfg_attr(test,
+# derive(ts_rs::TS))]` — so not one byte of it reaches the shipped binary, and
+# `cargo build`/`cargo clippy` never link it. It does appear in `Cargo.lock`;
+# that is bookkeeping, not weight.
+#
+# `serde-compat` (a default feature) is kept on purpose. Nothing exported today
+# carries a serde attribute, so it currently does nothing — but the moment
+# `models/` gains `#[serde(rename_all = "camelCase")]`, turning it off would
+# make ts-rs emit `snake_case` field names for a wire type serialised as
+# `camelCase`, and the generated file would look perfectly plausible while
+# being wrong. The failure mode is silent, so the feature stays.
+ts-rs = "12"
