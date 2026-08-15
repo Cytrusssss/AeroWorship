@@ -15,8 +15,8 @@
 //! cannot depend on `tauri` (ADR-0008). A command should read as: deserialise,
 //! call core, emit or return.
 //!
-//! Those directories exist but are still empty; each is populated by its own
-//! backlog item and declared here when it gains a first module.
+//! Each directory is populated by its own backlog item and declared here when
+//! it gains a first module.
 
 // Refuse to produce a release binary carrying Tauri's *dev* flavour (ADR-0016).
 //
@@ -57,6 +57,7 @@ compile_error!(
 
 pub mod commands;
 pub mod db;
+pub mod services;
 
 /// Builds and runs the Tauri application.
 ///
@@ -64,10 +65,21 @@ pub mod db;
 /// configuration is a normal library function.
 pub fn run() {
     tauri::Builder::default()
-        // The database is opened and brought up to date before the first window
-        // appears; failing here aborts start-up rather than letting the app come
-        // up with no storage behind it.
-        .setup(|app| db::init(app.handle()))
+        .setup(|app| {
+            // The database is opened and brought up to date before anything can
+            // query it; failing here aborts start-up rather than letting the app
+            // come up with no storage behind it.
+            db::init(app.handle())?;
+            // Then the windows are placed (FR-102). The Control Panel already
+            // exists by now — windows declared in `tauri.conf.json` are created
+            // before this hook runs — and is centred on the primary display by
+            // that configuration; this call adds the Projector Output on the
+            // first non-primary display, if there is one. It cannot fail the
+            // start-up: an output window that will not open leaves the operator
+            // with a working Control Panel, not with no application (NFR-08).
+            services::display::init(app.handle());
+            Ok(())
+        })
         // Every command in `commands/` has to be named here as well as defined;
         // one that is defined but not registered compiles cleanly and fails only
         // when the frontend invokes it.

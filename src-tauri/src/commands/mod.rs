@@ -39,15 +39,16 @@
 //! **No per-window scoping.** `capabilities/main-window.json:5` reads
 //! `"windows": ["main"]`, and that restriction binds `plugin:` commands only —
 //! the same ACL that does not gate the commands here is the only thing that
-//! reads it. App-defined commands have no per-window scoping at all, so the
-//! output window of FR-102/FR-105 will be able to call `list_monitors`, and
-//! every command added after it, from the moment the Display Service creates it,
-//! with no trace of that reach in any manifest. That asymmetry is worth stating
-//! plainly: `core:event:default` really is confined to the main window; nothing
-//! in this module is. It is not exploitable today — the output bundle is
-//! verified to contain zero `__TAURI_INTERNALS__` — but PRD §6.3 rests that
-//! isolation on an import rule, and an import rule does not constrain script
-//! that arrives through injected lyrics or a hostile template.
+//! reads it. App-defined commands have no per-window scoping at all, and since
+//! FR-102 that is a live fact rather than a forecast: the Display Service
+//! creates the `output` window at start-up, no capability names it, and it can
+//! call `list_monitors` — and every command added after it — with no trace of
+//! that reach in any manifest. That asymmetry is worth stating plainly:
+//! `core:event:default` really is confined to the main window; nothing in this
+//! module is. It is not exploitable today — the output bundle is verified to
+//! contain zero `__TAURI_INTERNALS__` — but PRD §6.3 rests that isolation on an
+//! import rule, and an import rule does not constrain script that arrives
+//! through injected lyrics or a hostile template.
 //!
 //! **Arguments.** Everything a command receives comes from the webview and is
 //! untrusted input, not a parameter our own code chose. `list_monitors` takes

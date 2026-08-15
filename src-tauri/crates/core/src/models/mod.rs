@@ -4,4 +4,4 @@
 
 pub mod monitor;
 
-pub use monitor::{flag_primary, monitor_id, Monitor};
+pub use monitor::{flag_primary, monitor_id, select_output_monitor, Monitor};

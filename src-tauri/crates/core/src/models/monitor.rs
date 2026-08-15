@@ -137,6 +137,52 @@ pub fn flag_primary(monitors: Vec<Monitor>, primary_id: Option<&str>) -> Vec<Mon
         .collect()
 }
 
+/// Picks the display the Projector Output belongs on, or `None` when there is
+/// none to pick (FR-102).
+///
+/// "First non-primary display" is resolved **by position, not by list order**:
+/// the non-primary display whose top-left corner comes first in virtual-screen
+/// reading order — smallest `x`, ties broken by smallest `y`, then by `id`. The
+/// result therefore depends only on the *set* of displays, never on the order
+/// they arrive in.
+///
+/// `None` means *do not create a fullscreen output*, and there are two ways to
+/// get it: no display is flagged primary, or every display is.
+//
+// **Why not list order.** The list comes from `EnumDisplayMonitors`, whose order
+// is not the left-to-right arrangement the user sees and is not promised to be
+// anything at all (see `list_monitors`). `monitors[1]` is "the second display"
+// in no sense a person operating a service would recognise. Position is the
+// property the operator actually arranged, so it is the one "first" is read
+// from. Left-to-right is the tiebreak because that is what "first" means in the
+// Display Settings picture; between two displays at the same `x` the upper one
+// wins, and `id` closes the last gap so the function is total and order-free.
+//
+// **Where this stops being a good answer.** With three or more displays — a
+// laptop, a confidence monitor and a projector — leftmost-non-primary is a
+// guess dressed as a rule; the projector is not reliably on the left. That is
+// exactly what FR-103 exists for: the operator reassigns the output display and
+// the choice is persisted per machine. This function is the startup default
+// FR-102 asks for, not a claim that the topology can be read correctly.
+//
+// **Why refusing is the right answer with no primary.** `flag_primary` marks
+// nothing when the OS gave no answer to "which display is primary". Treating
+// every display as non-primary would then let this pick the display the
+// operator is looking at and cover it with a fullscreen black window mid-
+// service. No output at all is recoverable in seconds through FR-103; a
+// projector image on the control display is not.
+pub fn select_output_monitor(monitors: &[Monitor]) -> Option<&Monitor> {
+    if !monitors.iter().any(|monitor| monitor.is_primary) {
+        return None;
+    }
+    monitors
+        .iter()
+        .filter(|monitor| !monitor.is_primary)
+        // `min_by_key` keeps the first of equal keys, but no two entries can
+        // tie: `id` is part of the key and is unique per display.
+        .min_by_key(|monitor| (monitor.x, monitor.y, monitor.id.as_str()))
+}
+
 /// Prefix for an id derived from the name the OS gives a display.
 //
 // The scheme tag is not decoration. This id is persisted by FR-103, and the

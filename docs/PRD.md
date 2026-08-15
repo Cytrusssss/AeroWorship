@@ -582,7 +582,7 @@ Two distinct mechanisms, chosen deliberately:
 - **Commands** (`invoke`) — request/response, used for anything that reads or mutates persistent state: search, CRUD, import, save, load, monitor management. Always `async`, always returning a typed `Result`.
 - **Events** (`emit` / `listen`) — one-way broadcast, used for anything real-time or multi-consumer: slide changes, output state, import progress, monitor topology changes.
 
-The full catalogue with payload shapes is in [Appendix D](#appendix-d--tauri-command--event-reference). Types are defined once in Rust and generated into TypeScript at build time ([NFR-33](#57-maintainability--accessibility)), so the contract cannot drift.
+The full catalogue with payload shapes is in [Appendix D](#appendix-d--tauri-command--event-reference). Types are defined once in Rust and generated into TypeScript by a checked gate that fails if the committed contract does not match the Rust types ([NFR-33](#57-maintainability--accessibility)), so the contract cannot drift.
 
 **Event naming convention:** `domain:verb` — `slide:show`, `slide:preload`, `output:state`, `import:progress`, `monitor:changed`, `session:dirty`.
 

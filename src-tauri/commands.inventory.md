@@ -29,9 +29,10 @@ consequences of the same fact:
 `capabilities/main-window.json` says `"windows": ["main"]`, and that scoping does
 **not** apply to anything listed here — per-window scoping exists only for
 ACL-gated commands. Every command below is callable from any window this app
-creates, including the output window (FR-102/FR-105) once the Display Service
-creates it. The output bundle imports no Tauri API today, but that is an import
-rule, not an enforcement boundary.
+creates, and as of FR-102 that is no longer hypothetical: the Display Service
+creates the `output` window at start-up, it is granted no capability at all, and
+it can nonetheless invoke every command listed below. The output bundle imports
+no Tauri API today, but that is an import rule, not an enforcement boundary.
 
 Conversely, creating `src-tauri/permissions/` or calling
 `Attributes::app_manifest(...)` in `build.rs` switches ACL enforcement **on** for

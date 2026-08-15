@@ -19,10 +19,12 @@
 # (`ts_rs::TS`, "exporting") — "Because Rusts procedural macros are evaluated
 # before other compilation steps, TypeScript bindings __cannot__ be exported
 # during compile time." `#[ts(export)]` expands to a `#[test]`, so the bindings
-# are written by `cargo test`, not by `cargo build`. PRD §6.4 says "generated
-# into TypeScript at build time"; that phrase is wider than the tool PRD §6.12
-# names first can deliver, and reconciling the two is a decision for the user,
-# not something to paper over here.
+# are written by `cargo test`, not by `cargo build`. That is unchanged and
+# unchangeable. What changed is what the PRD asks for: §6.4 (line 585) no longer
+# promises build time, it promises types "generated into TypeScript by a checked
+# gate that fails if the committed contract does not match the Rust types". That
+# gate is `npm run bindings:check`, wired as `pretypecheck`; the decision is
+# recorded in ADR-0034.
 #
 # Consequence worth stating plainly: `cargo test --workspace` **writes** into
 # `src/shared/bindings/`. That is deliberate — it makes regeneration a

