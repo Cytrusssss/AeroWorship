@@ -1453,3 +1453,59 @@ Diterima, karena keadaan akhir yang diinginkan justru itu — kedua berkas berub
 **Bantahan yang diterima di muka.** Empat cacat laten yang ditunda bersama-sama adalah bentuk yang persis diketahui gagal: masing-masing tampak kecil, dan yang menutupnya kelak menghadapi empat sekaligus di bawah tekanan tenggat item lain. Bila keberatan itu menang, yang paling murah dikerjakan lebih dulu adalah navigation handler — tiga baris, menutup satu-satunya di antara keempatnya yang berakibat **keluar dari mesin**.
 
 **Yang membatalkan keputusan ini.** `localStorage.setItem` pertama di kode Control Panel, atau item pertama yang merender konten berasal-berkas — mana pun lebih dulu.
+
+### ADR-0043 — `parse_scripture_ref` dibuat benar-benar murni dengan memisahkan tata bahasa dari pengetahuan kitab; `ScriptureRef` dirancang di sini sebab PRD tidak pernah mendefinisikannya
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-15 |
+| Status | Diterima |
+| Terkait | FR-205, FR-206, FR-207, FR-208, PRD Appendix A (baris 152-175), PRD Appendix D (baris 1640), [ADR-0020](decisions.md#adr-0020) · [ADR-0034](decisions.md#adr-0034) · [ADR-0038](decisions.md#adr-0038) |
+
+**Pertentangan, dinyatakan bukan dibulatkan.** Appendix D:1640 menyebut `parse_scripture_ref` **"pure, unit-tested"**. Tetapi nama dan singkatan kitab tidak hidup di kode — ia hidup di SQLite, di `bible_book_names` dan `bible_book_abbreviations`, keduanya berkunci `language_code`. Fungsi yang harus menanyakan database untuk tahu bahwa `Yoh` adalah Yohanes **tidak murni**, dan menyebutnya murni akan menjadi klaim ketiga di repo ini yang lebih lebar daripada kenyataan sesudah "at build time" ([ADR-0034](decisions.md#adr-0034)) dan bentuk `AppError` ([ADR-0038](decisions.md#adr-0038)).
+
+**Keputusan, dan ia menyelamatkan kalimat PRD alih-alih mengubahnya.** Tanggung jawabnya dipecah dua: tata bahasa yang mengurai `<token kitab> <pasal>:<ayat>` **tanpa mengenal satu kitab pun**, dan resolusi token→`book_id` yang menerima ejaan sebagai **argumen**. Hasilnya "pure, unit-tested" menjadi benar secara harfiah — nol SQL, nol I/O, nol `rusqlite` di modul — dan keempat kriteria terima FR-205 dapat diuji tanpa satu baris SQL. Ini kali pertama pertentangan PRD di repo ini ditutup tanpa mengubah PRD dan tanpa menerima klaim yang salah; keduanya mungkin karena kalimat itu ternyata menggambarkan **desain yang benar**, hanya saja desain itu belum ada.
+
+**`ScriptureRef` dirancang di sini, dan itu perlu dikatakan terang-terangan.** Tipe ini muncul dua kali di Appendix D (baris 1640, 1641) dan **tidak pernah didefinisikan di mana pun** dalam PRD. Bentuknya: rekaman datar, interval tertutup, kedua ujung selalu terisi — `Mzm 23` menjadi `23/None → 23/None`, `Kej 1:1-2:3` menjadi `1/Some(1) → 2/Some(3)`.
+
+**Mengapa datar, bukan enum bertag.** Keempat bentuk FR-205 adalah interval yang sama dilihat dari empat sudut. Konsumen sesungguhnya adalah FR-207, yang akan menjadi satu range-scan `bible_verses` terurut `(chapter, verse)`; enum bertag memaksa **setiap** konsumen — di Rust dan di TypeScript — menurunkan ulang interval itu. Menormalkan di parser membuat penurunan itu terjadi sekali, di tempat yang diuji.
+
+**Invarian both-or-neither, dan lubang yang sengaja ditinggalkan terbuka dengan peringatan.** `start_verse` dan `end_verse` `None` bersama atau `Some` bersama; `None` berarti "seluruh ayat pasal itu". Invarian ditegakkan di **parser**, bukan di tipe, sebab field tipe kawat harus publik. Konsekuensinya nyata dan sudah ditulis di komentar modul: item yang kelak menambahkan `Deserialize` untuk FR-207 **wajib memvalidasi ulang**, sebab nilai yang datang dari frontend tidak pernah lewat parser. Invarian yang dijaga oleh satu jalur masuk berhenti dijaga begitu jalur kedua dibuka.
+
+**Keputusan terbaik item ini adalah menghapus sebuah parameter.** `BookIndex::build(language_code, ejaan)` memilih bahasa **sekali, saat konstruksi**, sehingga pemanggil tidak punya cara mengekspresikan kesalahan "baris Indonesia + kode bahasa Inggris". Bentuk yang tampak lebih wajar — `resolve(token, language_code, rows)` — menyediakan kesalahan itu di **setiap** call site dan mendeteksinya di **nol**: ia akan me-resolve `John` terhadap baris Indonesia, menjawab `None`, dan FR-206 mengubah `None` itu menjadi full-text search yang terlihat persis seperti salah ketik operator. Kelas cacat yang paling mahal di produk ini bukan yang menjatuhkan aplikasi, melainkan yang **berhasil dan salah tanpa gejala**; API yang tidak dapat menyatakannya adalah pertahanan yang lebih kuat daripada test mana pun.
+
+**Ambigu tidak dilebur dengan tidak-dikenali.** FR-206 menuntut keduanya jatuh diam-diam ke full-text search, jadi di permukaan `parse_scripture_ref` keduanya `None`. Tetapi hanya satu yang menandakan **data rusak**, jadi perbedaannya dipindah ke tempat yang dapat ditindaklanjuti: `BookMatch::{Unique, Ambiguous, Unknown}` per query, `ambiguous_spellings()` yang menyebutkan setiap tabrakan secara **terurut** — diagnostik tak berurutan adalah diagnostik yang tak dapat diassert — dan `is_empty()` yang memisahkan "belum ada Alkitab untuk bahasa ini" dari "operator salah ketik". Nol tabrakan untuk data sehat; tidak nol adalah fakta tentang Alkitab yang **diimpor**, layak dilaporkan sekali di FR-208 dan bukan sekali per ketukan tombol.
+
+**Saat tabrakan terjadi, tidak ada yang menang.** Bukan `book_id` terkecil, dan bukan "nama penuh mengalahkan singkatan". Menjawab Judges kepada orang yang mengetik `Jud` untuk Jude benar separuh waktu **tanpa cara siapa pun menyadarinya** — dan layar yang salah di tengah khotbah adalah kegagalan yang tidak dapat ditarik kembali. Skema mengizinkan tabrakan itu ada (`bible_book_abbreviations` berkunci `(book_id, language_code, abbreviation)`), jadi ia bukan hipotesis.
+
+**Rentang terbalik ditolak, tidak ditukar diam-diam.** `Yoh 3:18-16` mengembalikan `None`. Menukarnya berarti menaruh perikop yang **tidak diminta** di layar; menolaknya berarti operator melihat hasil full-text search dan mengetik ulang. Yang kedua terlihat; yang pertama tidak.
+
+**Batas yang dinyatakan, bukan disembunyikan.** Parser tidak memvalidasi terhadap `bible_books.chapter_count` maupun keberadaan ayat — itu butuh data, dan data adalah FR-207/FR-208. `Mzm 151:1` parse dengan senang hati. **Dan konsekuensi terbesarnya:** nol kode produksi memanggil `BookIndex::build` hari ini, jadi FR-205 dapat diuji sepenuhnya tetapi **belum dapat dipakai operator**. Itu bukan cacat item ini; itu urutan yang PRD pilih. Yang tidak boleh terjadi adalah menandainya `done` lalu lupa bahwa jalur pertamanya belum pernah dijalankan dari ujung ke ujung.
+
+**Perintah IPC-nya sengaja tidak dibuat.** Tanpa FR-207 dan tanpa data kitab, ia tidak dapat dipanggil siapa pun secara berguna — ia hanya menambah permukaan IPC tanpa menambah kemampuan, dan memicu kondisi pembatal [ADR-0041](decisions.md#adr-0041) secara cuma-cuma. Nama fungsi `core`-nya sengaja dibuat sama dengan nama perintah Appendix D supaya perintah kelak menjadi pembungkus satu baris.
+
+**Yang membatalkan keputusan ini.** FR-207, yang menjadi konsumen nyata pertama `ScriptureRef` — bila range-scan-nya ternyata tidak berbentuk seperti yang diandaikan di sini, bentuk datar itu harus dihitung ulang sebelum ada data gereja yang tersimpan memakainya.
+
+### ADR-0044 — Normalisasi Unicode (NFC/NFD) tidak dibeli sekarang; kontrak `BookIndex::build` menuntut NFC dan FR-208 yang menegakkannya
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-26 |
+| Status | Diterima |
+| Terkait | FR-205, FR-206, FR-208, NFR-16, NFR-28, [ADR-0043](decisions.md#adr-0043) |
+
+**Temuan yang memaksa keputusan ini (audit FR-205, W2).** `normalise_spelling` melipat kasus dengan `char::to_lowercase` per karakter dan **tidak menormalisasi Unicode sama sekali**. Tiga divergensi nyata: `"Éxodo"` sebagai U+00C9 dan sebagai `E`+U+0301 menghasilkan kunci **berbeda**; `char::to_lowercase` tidak menerapkan aturan sigma-akhir Yunani yang `str::to_lowercase` terapkan, sehingga `ΙΩΑΝΝΗΣ` melipat ke `ιωαννησ` sementara ejaan tersimpan berakhir `ς`; dan `İ` U+0130 melebar menjadi `i`+U+0307.
+
+**Skenario kegagalannya diam, seperti seluruh keluarga temuan di item ini.** Alkitab Spanyol diekspor dari perkakas macOS, di mana NFD adalah default filesystem. `Éxodo` tersimpan NFD. Operator di Windows mengetik `Éxodo` — keyboard Windows memancarkan NFC — dan mendapat `Unknown` → `None` → FR-206 jatuh ke pencarian teks penuh. Nol diagnostik menyala. Lebih buruk: FTS5 dikonfigurasi `remove_diacritics 2` (`001_initial_schema.sql:288`), jadi fallback itu mungkin **menemukan sesuatu** — dan operator melihat hasil, hanya bukan hasil yang benar.
+
+**Keputusan. Crate normalisasi Unicode tidak ditambahkan sekarang.** Sebagai gantinya kontrak `BookIndex::build` menyatakan bahwa ejaan **wajib NFC**, dan FR-208 — satu-satunya jalan data kitab masuk — yang menegakkannya di batas impor.
+
+**Alasan pertama, dan ia terukur meski datanya belum ada.** Kedua bahasa yang FR-205 sebut namanya **tidak memuat satu karakter non-ASCII pun** dalam nama kitab bakunya. Enam puluh enam nama Indonesia — Kejadian, Keluaran, Hakim-hakim, Kidung Agung, Wahyu — dan enam puluh enam nama Inggris seluruhnya ASCII, dan pada ASCII, NFC dan NFD **identik** dan `to_lowercase` per-karakter **sama dengan** case folding. Jadi untuk seluruh cakupan yang item ini janjikan, gigitan W2 adalah **nol**. Ia mulai menggigit pada bahasa ketiga yang belum ada jadwalnya.
+
+**Alasan kedua, NFR-16.** Repo ini sudah membayar disiplin itu berkali-kali: `ts-rs` dev-only dengan `cargo tree --edges normal` diverifikasi nol, dan `Cf` ditutup lewat tabel `matches!` justru untuk menghindari crate properti Unicode. Membeli crate normalisasi untuk masalah yang **belum dapat terjadi** akan membalik prinsip itu pada kasus pertama yang lemah.
+
+**Yang membuat penundaan ini jujur dan bukan penundaan biasa: ia memindahkan kewajiban, bukan menghapusnya.** Kontrak `build` menyebutkan NFC, jadi FR-208 tidak dapat membacanya sebagai API yang sudah mengurus semuanya — kekeliruan yang persis dicegah W4 dari audit yang sama. Dan bila FR-208 memilih **tidak** menormalisasi, itu keputusan yang harus diambil di sana secara sadar dan tercatat, bukan diwariskan diam-diam.
+
+**Bantahan yang diterima di muka.** "Wajib NFC" yang ditegakkan oleh konvensi dan tinjauan kode adalah penegakan yang lebih lemah daripada kode, dan repo ini sendiri sudah menuliskan mengapa ([ADR-0041](decisions.md#adr-0041)). Bila FR-208 ternyata tidak dapat menegakkannya dengan murah, jawaban yang benar adalah membeli crate itu di sana — bukan membiarkan kontrak menjanjikan sesuatu yang tak seorang pun periksa.
+
+**Yang membatalkan keputusan ini.** Impor pertama untuk bahasa yang nama kitabnya memuat karakter non-ASCII — Spanyol, Portugis, Vietnam, Yunani, atau bahasa daerah Indonesia mana pun yang memakai diakritik. Sejak saat itu argumen "gigitannya nol" berhenti berlaku dan biayanya harus dihitung ulang di item yang sama.
