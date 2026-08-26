@@ -4,6 +4,7 @@
 
 pub mod monitor;
 pub mod scripture;
+pub mod slide;
 pub mod template;
 // Not `pub`: `text` holds no serde type and contributes nothing to the
 // TypeScript contract. It exists so `scripture` and `template` share one
@@ -15,6 +16,7 @@ pub use scripture::{
     parse_reference, parse_scripture_ref, resolve_reference, BookIndex, BookMatch, ParsedReference,
     ScriptureRef,
 };
+pub use slide::{split_slides, SlideSplit};
 pub use template::{
     parse_template, validate_template, AspectRatio, BackgroundFill, Canvas, GradientStop,
     HorizontalAlign, ImageFit, Layer, OutlineEffect, Rect, ShadowEffect, ShapeFill, ShapeGeometry,
