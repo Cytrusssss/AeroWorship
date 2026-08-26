@@ -32,6 +32,8 @@ use std::str::Chars;
 
 use serde::Serialize;
 
+use super::text::is_format_char;
+
 /// A resolved passage: one book, and a range running from one point to
 /// another.
 ///
@@ -785,13 +787,10 @@ fn normalise_spelling(spelling: &str) -> Option<String> {
 // arrivals are all `Cf`: a BOM on the first line of an import (FR-208), a soft
 // hyphen from typeset data, a zero-width space from a Word export.
 //
-// **Why `Cf` is written out instead of pulled from a crate.** A Unicode
-// property lookup would be a new dependency against a 15 MB installer
-// (NFR-16), for a property whose entire assigned set is the two dozen ranges
-// below. This is a snapshot of Unicode 16.0. A format character added in a
-// later Unicode would pass through, which is exactly the behaviour this
-// function replaces and no worse -- the table can only go stale in the
-// direction it started from.
+// The `Cf` table itself is `models::text::is_format_char`, shared with
+// `models::template`, which refuses the same characters instead of deleting
+// them; the reasoning for hand-writing it rather than taking a Unicode crate
+// is there, with the table.
 //
 // `Cc` needs no table: `char::is_control` *is* the `Cc` test. `White_Space`
 // overlaps both categories in one direction only (tab is `Cc`; U+00A0 and
@@ -799,35 +798,6 @@ fn normalise_spelling(spelling: &str) -> Option<String> {
 // function is never asked about a separator.
 fn is_invisible(c: char) -> bool {
     c.is_control() || is_format_char(c)
-}
-
-/// Unicode general category `Cf`, as of Unicode 16.0.
-#[rustfmt::skip]
-fn is_format_char(c: char) -> bool {
-    matches!(
-        c,
-        '\u{00ad}'                   // SOFT HYPHEN
-        | '\u{0600}'..='\u{0605}'     // Arabic number signs
-        | '\u{061c}'                 // ARABIC LETTER MARK
-        | '\u{06dd}'                 // ARABIC END OF AYAH
-        | '\u{070f}'                 // SYRIAC ABBREVIATION MARK
-        | '\u{0890}'..='\u{0891}'     // Arabic pound and piastre marks
-        | '\u{08e2}'                 // ARABIC DISPUTED END OF AYAH
-        | '\u{180e}'                 // MONGOLIAN VOWEL SEPARATOR
-        | '\u{200b}'..='\u{200f}'     // ZWSP, ZWNJ, ZWJ, LRM, RLM
-        | '\u{202a}'..='\u{202e}'     // bidi embedding and override
-        | '\u{2060}'..='\u{2064}'     // WORD JOINER and invisible operators
-        | '\u{2066}'..='\u{206f}'     // bidi isolates and deprecated formats
-        | '\u{feff}'                 // ZERO WIDTH NO-BREAK SPACE (BOM)
-        | '\u{fff9}'..='\u{fffb}'     // interlinear annotation
-        | '\u{110bd}'                // KAITHI NUMBER SIGN
-        | '\u{110cd}'                // KAITHI NUMBER SIGN ABOVE
-        | '\u{13430}'..='\u{1343f}'   // Egyptian hieroglyph format controls
-        | '\u{1bca0}'..='\u{1bca3}'   // shorthand format controls
-        | '\u{1d173}'..='\u{1d17a}'   // musical format controls
-        | '\u{e0001}'                // LANGUAGE TAG
-        | '\u{e0020}'..='\u{e007f}'   // tag characters
-    )
 }
 
 /// Rewrites the `1`/`I` in `1 Yohanes` into one canonical form, or `None` if

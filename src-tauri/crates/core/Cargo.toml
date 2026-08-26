@@ -39,6 +39,22 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled"] 
 # depends on `serde` with `derive`, so the crates are in the graph and the
 # installer either way — the only new thing is that this crate names them too.
 serde = { version = "1", features = ["derive"] }
+# FR-401 needs a JSON *reader*, not just a derive: `parse_template` is handed
+# the text of an `.aerotpl` file and has to refuse it before anything renders
+# (NFR-28), so `serde_json::from_str` is the function the item is built around.
+#
+# Against NFR-16 this is the same argument `serde` makes above, and it is
+# measured rather than assumed: `serde_json` 1.0.151 is already in `Cargo.lock`
+# and already in the installer, because `tauri` depends on it for the IPC
+# boundary. Naming it here adds no crate to the graph; it only makes this crate
+# say out loud what it uses.
+#
+# Note the shell crate still refuses it, and that is not an inconsistency — see
+# the comment in `src-tauri/Cargo.toml`. A declared `serde_json` *there* invites
+# a command taking `serde_json::Value` from the frontend. Here it is the tool
+# for reading a document this crate then validates field by field, which is the
+# opposite of accepting free-form JSON.
+serde_json = "1"
 
 [dev-dependencies]
 # The Rust→TypeScript generator behind NFR-33.

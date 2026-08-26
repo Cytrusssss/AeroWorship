@@ -1509,3 +1509,39 @@ Diterima, karena keadaan akhir yang diinginkan justru itu — kedua berkas berub
 **Bantahan yang diterima di muka.** "Wajib NFC" yang ditegakkan oleh konvensi dan tinjauan kode adalah penegakan yang lebih lemah daripada kode, dan repo ini sendiri sudah menuliskan mengapa ([ADR-0041](decisions.md#adr-0041)). Bila FR-208 ternyata tidak dapat menegakkannya dengan murah, jawaban yang benar adalah membeli crate itu di sana — bukan membiarkan kontrak menjanjikan sesuatu yang tak seorang pun periksa.
 
 **Yang membatalkan keputusan ini.** Impor pertama untuk bahasa yang nama kitabnya memuat karakter non-ASCII — Spanyol, Portugis, Vietnam, Yunani, atau bahasa daerah Indonesia mana pun yang memakai diakritik. Sejak saat itu argumen "gigitannya nol" berhenti berlaku dan biayanya harus dihitung ulang di item yang sama.
+
+### ADR-0045 — Dokumen template ditolak secara default lewat `deny_unknown_fields` menyeluruh; `name` dan `author` sengaja tetap teks manusia, dan kewajibannya dipindahkan ke konsumen
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-26 |
+| Status | Diterima |
+| Terkait | FR-401, FR-402, FR-403, FR-405, FR-408, FR-409, NFR-15, NFR-28, NFR-33, [ADR-0018](decisions.md#adr-0018) · [ADR-0042](decisions.md#adr-0042) · [ADR-0043](decisions.md#adr-0043) |
+
+**Konteks yang membuat item ini berbeda dari dua item sebelumnya.** FR-205 harus merancang `ScriptureRef` sebab PRD menyebutnya dua kali tanpa pernah mendefinisikannya; SETUP-05 dan FR-102 masing-masing menemukan pertentangan PRD. FR-401 tidak menemukan satu pun: Appendix B mendefinisikan dua puluh tipe secara lengkap, dan kode ini memetakannya 1:1. Yang harus diputuskan seluruhnya adalah hal yang Appendix B **tidak** atur.
+
+**Keputusan pertama, dan ia yang paling menentukan. `deny_unknown_fields` dipasang di setiap struct dan setiap enum bertag — sebelas dan tiga.** Menolak `type` yang tidak dikenal **tidak cukup**: serde secara default **mengabaikan** field asing, sehingga `{"type":"background","onLoad":"alert(1)"}` lolos diam-diam dan duduk di dokumen sampai renderer menyebarnya ke DOM. Dan DOM itu, menurut [ADR-0042](decisions.md#adr-0042), berbagi **satu web origin** dengan Control Panel — jadi muatan yang menumpang di sana mendapat `localStorage`, `IndexedDB`, dan `BroadcastChannel` panel operator.
+
+**Harganya dinyatakan, bukan disembunyikan:** menambah field ke Appendix B menjadi perubahan yang **memutus kompatibilitas** — build lama menolak dokumen baru mentah-mentah. Itu diterima justru karena `schema_version` ada untuk kasus itu, dan menolak keras di batas kepercayaan adalah perilaku yang diinginkan.
+
+**Keputusan kedua. `schema_version` dibaca lewat probe longgar satu field sebelum deserialisasi ketat.** Tanpa urutan itu, dokumen versi 2 gagal sebagai `unknown field` dan operator diberi tahu berkasnya **rusak** padahal ia hanya lebih baru. FR-708 menuntut perilaku ini untuk `.aero`; ia diterapkan di sini meski FR-708 tidak mencakup template, sebab kerugiannya identik — orang membuang berkas yang sebenarnya baik-baik saja.
+
+**Keputusan ketiga, dan ia sengaja terbelah. `name` dan `author` menolak pemisah path, tetapi menerima metakarakter markup.**
+
+Keduanya satu-satunya string berbasis **blocklist** di dokumen ini; setiap string lain dikunci allowlist sempit — warna ke heks, id ke UUID, font ke alfanumerik, `d` ke kelas karakter perintah path.
+
+**Pemisah path (`/`, `\`, `:`, dan `..` di mana pun) ditolak** sebab `name` adalah sumber paling alami untuk nama berkas ekspor `.aerotpl` (FR-409), dan **tidak ada nama template sah yang memuat pemisah path**. Membuatnya tak terwakili hari ini lebih murah daripada mengandalkan FR-409 mengingat untuk membersihkannya.
+
+**`<`, `>`, `&`, `"`, `'` diterima, dan ini keputusan sadar.** "Natal & Tahun Baru" adalah nama template yang wajar; menolaknya membuat validator berdebat dengan penggunanya soal tanda baca. Pertahanan terhadap markup adalah **escaping di batas render**, bukan penyempitan di sini — menaruhnya di sini memberi rasa aman palsu **sekaligus** menolak masukan yang benar.
+
+**Konsekuensinya dipindahkan, bukan dihapus, dan itu bagian terpenting keputusan ini.** Tabel *"What this module deliberately does not check"* di kepala modul kini menyebut kewajiban ini bersama tiga lainnya: konsumen **wajib** menempatkan `name` dan `author` di text node dan tidak pernah merangkainya menjadi HTML. Tanpa baris itu, pembaca yang baru saja membaca "colours, ids, font names and SVG path data are matched against allowlists" akan menyimpulkan `name` juga aman — dan kesimpulan itu masuk akal, salah, dan tidak terbantahkan di mana pun.
+
+**Keputusan keempat. Tabel `Cf` dipromosikan menjadi milik bersama, bukan disalin.** Daftar dua belas karakter arah yang semula ditulis tangan **tidak konsisten dengan kriterianya sendiri**: ia memuat LRM dan RLM tetapi tidak U+061C ALM, yang melakukan hal identik dan yang tabel `Cf` di parser kitab sudah mencantumkan. Argumen asli untuk tidak menyalin — "tabel kedua yang harus dijaga sinkron, tanpa manfaat" — **benar**, dan justru itu argumen untuk berbagi. Tabel kini tinggal di `models/text.rs`, privat, sebab "code point mana yang `Cf`" adalah fakta tentang **Unicode**, bukan tentang kitab maupun template.
+
+**Predikat template sengaja lebih luas daripada predikat parser kitab** — `Cc` ∪ `Cf` ∪ {U+2028, U+2029} ∪ empat Hangul filler — dan doc-nya menyatakan bahwa keduanya **bukan** predikat yang sama, supaya tidak ada yang menggabungkannya lalu diam-diam mengubah penghapusan separator di parser kitab. Hangul filler ikut sebab `is_alphanumeric()`-nya **true** dan render-nya kosong, sehingga sebuah nama yang seluruhnya filler lolos aturan "must not be blank" dan tetap menghasilkan baris kosong di picker — persis kerugian yang aturan itu dibuat untuk mencegah.
+
+**Yang tidak dibeli, dan siapa pemiliknya.** Grammar path SVG penuh — hanya kelas karakternya yang ditegakkan di sini (FR-403). Penyelesaian `media_id` terhadap filesystem (NFR-15/FR-409). Enumerasi font terpasang (FR-402). Batas byte pada `validate_template`, yang menerima dokumen sudah-terdeserialisasi sehingga tidak tahu ukuran aslinya — diukur tidak dapat diperkuat menjadi amplifikasi memori, sebab setiap `Vec` dan setiap `String` punya batasnya sendiri dan dokumen yang lolos otomatis ≈210 KB.
+
+**Konsekuensi jujur yang harus dibaca terang-terangan.** FR-401 dapat diuji sepenuhnya tetapi **belum dapat dipakai operator**: nol kode produksi memanggil `parse_template`, tidak ada renderer, dan perintah `save_template`/`get_template` sengaja tidak dibuat sebab perintah kedua memicu kondisi pembatal [ADR-0041](decisions.md#adr-0041) tanpa menambah kemampuan apa pun.
+
+**Yang membatalkan keputusan ini.** Renderer pertama (FR-402/403/405) — ia menjadi konsumen nyata pertama, dan bila ia ternyata tidak dapat memenuhi kewajiban text-node yang keputusan ketiga pindahkan kepadanya, penyempitan `check_display_text` harus dihitung ulang di sana, bukan diwariskan lagi.
