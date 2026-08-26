@@ -13,14 +13,18 @@
 //! - [`open_and_migrate`] is what an application start-up wants: open, bring
 //!   the schema up to date, hand back a usable connection.
 //!
-//! `queries/` and `fts/` from PRD §6.13 are not here yet; they belong to the
-//! items that first read and write the tables (FR-2xx), together with the
-//! `reindex_song` routine that replaces Appendix A's illustrative FTS trigger
-//! (see the head of `migrations/001_initial_schema.sql`).
+//! `queries/` from PRD §6.13 exists as of FR-203, which opened the first write
+//! path into the tables; it holds one module per aggregate and grows as the
+//! FR-2xx items reach the rest of Appendix A. `fts/` is still absent, and
+//! deliberately: it belongs to FR-201, together with the `reindex_song` routine
+//! that replaces Appendix A's illustrative FTS trigger (see the head of
+//! `migrations/001_initial_schema.sql`). Songs written before that item lands
+//! are not in the index and FR-201 owes them a backfill.
 
 mod connection;
 mod error;
 mod migrations;
+pub mod queries;
 
 use std::path::Path;
 

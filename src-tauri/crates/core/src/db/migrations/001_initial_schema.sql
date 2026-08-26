@@ -15,8 +15,10 @@
 -- connection opened afterwards. An unnoticed `foreign_keys = OFF` means none of
 -- the `REFERENCES` and `ON DELETE CASCADE` clauses below enforce anything.
 --
--- All four therefore live in `super::connection::configure`, which every
--- connection goes through and which reads each value back to prove it applied.
+-- All four therefore live in `super::connection`: `apply_pragmas` sets them and
+-- `verify_pragmas` reads every one of them back to prove it applied. Both run
+-- inside `connection::open`, which is the only way this crate hands out a
+-- connection: `db` re-exports `open` and nothing else from that module.
 -- `journal_mode = WAL` additionally *cannot* run inside a transaction, and this
 -- file always does (see `super::migrate`).
 --
@@ -46,7 +48,7 @@ CREATE TABLE songs (
     copyright_text   TEXT,
     song_key         TEXT,
     tempo_bpm        INTEGER,
-    default_arrangement_id TEXT,                    -- FK added below (circular)
+    default_arrangement_id TEXT,                    -- no FK; two triggers below
     source_provider  TEXT,                          -- FR-605 provenance
     source_url       TEXT,
     retrieved_at     TEXT,
@@ -107,7 +109,30 @@ CREATE TABLE arrangement_items (
 );
 CREATE INDEX idx_arritems_section ON arrangement_items(section_id);
 
--- Circular reference resolved after both tables exist.
+-- ── What the two triggers below enforce, and what nothing enforces. ─────────
+--
+-- They are not a foreign key, and this file used to say they were.
+-- `songs.default_arrangement_id` has no `REFERENCES` clause at all: the
+-- reference is circular (`songs` → `song_arrangements` → `songs`), so the
+-- column cannot carry one at CREATE time, and SQLite cannot add one afterwards
+-- without rewriting the table.
+--
+-- What the triggers do hold: the *write-to-`songs`* direction, on both INSERT
+-- and UPDATE. A song cannot be pointed at an arrangement that does not exist,
+-- or at one belonging to another song.
+--
+-- What nothing holds: **DELETE**. Neither trigger fires when the
+-- `song_arrangements` row a song points at is deleted, and with no FK there is
+-- no `ON DELETE` either — so `songs.default_arrangement_id` is left naming a
+-- row that is gone. Proved against a connection rather than inferred from the
+-- missing `REFERENCES`: point a song at its own arrangement (1 row changed),
+-- `DELETE FROM song_arrangements` (1 row deleted, none left), and
+-- `default_arrangement_id` still reads back as that arrangement's id.
+--
+-- Whose it is: **FR-204**, which opens the delete-an-arrangement path, and
+-- FR-202 for hard delete. Closing it means adding the FK, which means
+-- rewriting the table in a *later* migration — this one is not edited
+-- (ADR-0049).
 CREATE TRIGGER trg_songs_default_arrangement_fk
 BEFORE UPDATE OF default_arrangement_id ON songs
 WHEN NEW.default_arrangement_id IS NOT NULL

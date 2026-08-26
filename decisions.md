@@ -1607,3 +1607,85 @@ Keduanya satu-satunya string berbasis **blocklist** di dokumen ini; setiap strin
 **Dan teks slide itu sendiri tidak tepercaya.** Kalimat itu ditulis sebagai doc `///` pada `slides` justru supaya ts-rs menyalinnya ke `src/shared/bindings/SlideSplit.ts`, tempat pembaca frontend akan membacanya: isinya adalah apa pun yang dimuat `.aero` tulisan program lain, impor PPTX/PDF, atau tempelan operator, dan membangun markup darinya — `innerHTML`, `v-html`, template string — menjalankan skrip berkas itu di origin yang dibagi Control Panel ([ADR-0042](decisions.md#adr-0042)). Jawaban yang aman kebetulan juga jawaban yang benar: dengan `white-space: pre`, `\n` di antara dua baris **adalah** pemisah baris, sehingga `el.textContent = slides[i]` merender persis sebagaimana dimaksud dan tidak ada `<br>` yang dibutuhkan di mana pun.
 
 **Yang membatalkan keputusan ini.** Renderer pertama (FR-402/403/405). Ia adalah pihak yang kepadanya W2 dan overflow horizontal dipindahkan, dan bila ia ternyata tidak dapat menyalakan sinyal untuk keduanya, yang harus dihitung ulang adalah keputusan "nyatakan di kontrak" — bukan diwariskan sekali lagi ke item berikutnya.
+
+---
+
+### ADR-0048 — Ronde mutasi wajib menyentuh mtime sesudah pemulihan dan menjalankan ulang gate penuh; pemulihan yang terbukti benar lewat sha256 tetap dapat meninggalkan hijau yang palsu
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-27 |
+| Status | Diterima |
+| Terkait | FR-203, FR-205, FR-310, FR-401, GATE-G10, NFR-32, [ADR-0045](decisions.md#adr-0045) · [ADR-0047](decisions.md#adr-0047) |
+
+**Mengapa ini ADR dan bukan catatan.** Seluruh disiplin repo ini bertumpu pada satu aturan: suite hijau tidak membuktikan apa pun sampai mutasi dijalankan. Empat item terakhir ditutup atas dasar itu, dengan enam puluh lebih mutasi dijalankan dan nol lolos. Temuan di bawah menyerang **kepercayaan pada ronde mutasi itu sendiri**, bukan pada satu item — jadi ia wajib duduk di tempat yang dibaca sebelum ronde berikutnya, bukan di baris changelog yang akan tenggelam.
+
+**Cacatnya.** Prosedur ronde mutasi di repo ini adalah: salin berkas produksi ke `%TEMP%`, catat sha256, mutasi, jalankan test, **pulihkan dari salinan pristine**, buktikan pemulihan dengan sha256 yang sama. Prosedur itu benar sejauh yang ia klaim — dan tetap dapat berakhir dengan hijau yang palsu.
+
+Sebabnya: penyalinan yang **mempertahankan mtime** (`shutil.copy2`, `cp -p`, `Copy-Item` dalam beberapa bentuk) memulihkan isi berkas **beserta waktu modifikasinya yang lama**. Fingerprint `cargo` berbasis mtime, bukan berbasis isi. Maka sesudah pemulihan, cargo menyimpulkan tidak ada yang berubah dan **tidak membangun ulang** — dan gate penuh berikutnya menjalankan **binary mutan yang masih tersimpan di `target/`**, di atas pohon sumber yang sha256-nya terbukti pristine.
+
+**Bentuk kegagalannya asimetris, dan itu yang membuatnya berbahaya.** Ia terdeteksi pada ronde FR-203 hanya karena arah kebetulannya menguntungkan: gate melaporkan satu test **GAGAL** padahal sumbernya sudah benar, sehingga ada yang harus dijelaskan. Arah sebaliknya tidak akan meminta penjelasan apa pun — mutan yang **tidak** memerahkan test apa pun akan dilaporkan sebagai "gate hijau, item siap ditutup", dan tidak ada satu pun sinyal yang muncul. Kepercayaan diletakkan pada sha256, dan sha256-nya memang benar; yang salah adalah menyimpulkan "sumber pristine" berarti "yang dijalankan pristine".
+
+**Keputusan.** Setiap ronde mutasi di repo ini wajib, sesudah memulihkan berkas produksi:
+
+1. **Menyentuh mtime** setiap berkas yang dipulihkan (`touch`, atau menyalin dengan cara yang tidak mempertahankan mtime), dan
+2. **Menjalankan ulang gate penuh** — bukan hanya suite yang relevan — lalu melaporkan angkanya.
+
+Kedua langkah, bukan salah satu. `touch` tanpa gate ulang tidak membuktikan apa-apa; gate ulang tanpa `touch` adalah persis kegagalan di atas.
+
+**Mengapa sha256 tetap dipertahankan dan tidak diganti.** Ia menjawab pertanyaan yang berbeda dan tetap perlu: *apakah kode produksi kembali seperti semula.* Yang ditambahkan di sini menjawab pertanyaan kedua yang selama ini diam-diam diandaikan terjawab olehnya: *apakah yang barusan dijalankan adalah kode itu.* Dua klaim, dua bukti.
+
+**Ruang lingkup, dinyatakan supaya tidak dibaca lebih luas.** Hasil **per-mutasi** dari ronde-ronde sebelumnya tidak tercemar, dan alasannya spesifik: tiap mutan **ditulis** ke berkas produksi dengan mtime baru, sehingga cargo selalu membangun ulang untuk menjalankan mutan. Yang berisiko hanyalah **keadaan akhir** — pengukuran hijau sesudah pemulihan terakhir. Untuk FR-203 keadaan akhir itu diverifikasi ulang oleh coordinator dengan `touch` eksplisit atas ketiga berkas `db/` lalu gate penuh: 709 test, nol gagal.
+
+**Yang membatalkan keputusan ini.** Cargo berpindah ke fingerprint berbasis isi (ia sudah punya `checksum-freshness` di belakang flag nightly). Bila itu menjadi perilaku baku pada toolchain yang repo ini pakai, langkah `touch` menjadi tidak perlu — tetapi langkah gate-ulang **tetap**, sebab ia juga menangkap pemulihan yang gagal separuh.
+
+---
+
+### ADR-0049 — Appendix A menegakkan lebih sedikit daripada yang komentarnya janjikan; enam relasi lintas-induk diinventarisasi dengan pemiliknya, dan jalur tulis aplikasi memikul apa yang skema tidak pegang
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-27 |
+| Status | Diterima |
+| Terkait | FR-201, FR-202, FR-203, FR-204, FR-206, FR-207, FR-505, FR-506, FR-604, FR-701, FR-703, FR-705, NFR-15, NFR-28, Appendix A, [ADR-0045](decisions.md#adr-0045) · [ADR-0047](decisions.md#adr-0047) · [ADR-0048](decisions.md#adr-0048) |
+
+**Konteks.** FR-203 adalah item pertama yang menulis ke SQLite. Empat item sebelumnya seluruhnya fungsi murni, jadi tiga kelas risiko masuk ke repo ini sekaligus dan untuk pertama kalinya: SQL, transaksi, dan **invarian yang ditegakkan skema alih-alih tipe**. Audit pembukanya menemukan nol Critical pada kelas pertama dan kedua — nol SQL yang dirakit, transaksi yang benar-benar rollback pada **setiap** jalur error termasuk error dari cek Rust, nol panic. Seluruh temuannya jatuh pada kelas ketiga, dan bentuknya konsisten: **skema menjanjikan lebih daripada yang ia tegakkan, dan komentarnya menjanjikan lebih daripada skemanya.**
+
+**Temuan pertama, dan ia dibuktikan runtime alih-alih dibaca.** `songs.default_arrangement_id` **tidak punya foreign key sama sekali**. Baris 49 berbunyi `-- FK added below (circular)` dan baris 110 `-- Circular reference resolved after both tables exist`; yang benar-benar ditambahkan di bawah adalah **dua trigger**, `BEFORE UPDATE OF default_arrangement_id` dan `BEFORE INSERT`. Keduanya menjaga arah *tulis ke `songs`*. Tidak satu pun menyala ketika baris `song_arrangements` yang ditunjuk **dihapus**, dan karena tidak ada FK, tidak ada `ON DELETE` untuk membersihkannya.
+
+Dibuktikan langsung, bukan disimpulkan dari ketiadaan `REFERENCES`: menunjuk lagu ke arrangement miliknya sendiri → `Ok(1)`; `DELETE FROM song_arrangements` → `Ok(1)`; baris arrangement tersisa **nol**; `songs.default_arrangement_id` **tetap** `Some("arr")`. Referensi gantung, diterima diam-diam.
+
+Yang menjadikannya Warning dan bukan catatan gaya adalah **komentar baris 49 itu sendiri**: pembaca FR-204 yang membacanya akan menyimpulkan penghapusan arrangement sudah terjaga. Kesimpulan itu masuk akal, salah, dan tidak terbantahkan di mana pun dalam berkas. Ini kelas cacat yang sama — komentar yang klaimnya lebih luas daripada kodenya — yang di repo ini sudah menjadi temuan nyata **lima kali**, dua di antaranya kalimat yang saya sendiri salin ke ADR.
+
+**Temuan kedua: asimetri tulis-baca yang tidak dinyatakan.** `insert_arrangement` menutup lubang lintas lagu untuk jalur masuknya sendiri; `load_arrangements` mengembalikan apa pun yang ada di tabel. Yang membuat ini asimetri dan bukan sekadar keterbatasan: **modul yang sama sudah menetapkan kebijakan sebaliknya untuk invarian tak-tertegakkan lainnya** — `load_sections` **menolak** `section_type` asing saat baca, dengan alasan eksplisit bahwa barisnya mungkin ditulis oleh sesuatu selain SQLite. Satu invarian yang skema tidak jaga diperiksa saat baca; yang lain tidak; dan tidak satu kalimat pun menyatakan mengapa berbeda.
+
+Akibat keduanya lebih buruk daripada yang doc sebutkan, dan ia bukan tentang menyunting: `DELETE FROM songs` men-*cascade* `songs → song_sections → arrangement_items`, sehingga **menghapus lagu B diam-diam mencabut satu posisi dari arrangement lagu A** — meninggalkan lubang di urutan ibadah yang tak seorang pun sunting.
+
+**Keputusan.**
+
+1. **Jalur tulis aplikasi memikul apa yang skema tidak pegang, dan itu dinyatakan di kode, bukan diandaikan.** FR-203 sudah melakukannya untuk lintas lagu dan untuk `default_arrangement_id` saat insert. Setiap jalur tulis baru ke tabel yang sama memikul cek yang sama — impor `.aero` (FR-703) adalah penulis pertama yang melewati `insert_arrangement`, dan lubangnya kembali terbuka lewat pintu itu.
+2. **Migrasi 001 tidak diubah DDL-nya.** Menambahkan FK yang hilang berarti menulis ulang tabel di SQLite dan itu milik item yang benar-benar membutuhkannya (FR-204). Yang diperbaiki sekarang hanyalah **komentar yang berbohong** — sebab komentar itulah yang membuat pembaca berikutnya berhenti memeriksa.
+3. **Kewajiban dicatat di baris item penerimanya**, bukan hanya di ADR ini. Pelajaran W1 FR-310, yang audit FR-203 langsung mengulanginya terhadap **tiga** baris sekaligus: doc menamai FR-202, FR-701 dan FR-604 sebagai pemilik batas ukuran, dan ketiga baris itu **diam** — dua kosong, satu memuat observasi ukuran tipikal yang bukan kewajiban. Kelimanya kini terisi.
+
+**Batas ukuran: mengapa ini BUKAN sekadar pengulangan kelima.** Aturan yang [ADR-0047](decisions.md#adr-0047) tetapkan berbunyi untuk **fungsi murni**. `insert_song` bukan fungsi murni, dan perluasannya tidak setara: biaya fungsi murni bersifat sementara — `Vec` yang di-drop — sedangkan biaya di sini **persisten dan berulang**. Tempelan 20 MB ditulis sekali lalu dimaterialkan ulang oleh **setiap** `load_song` seumur database, ikut ke setiap ekspor `.aero` dan setiap backup. **Menyebut nama pembatas tidak membatalkan sebuah tulisan.** Karena itu pemicunya dituliskan presisi alih-alih dibiarkan sebagai niat: **commit pertama yang mendaftarkan `#[tauri::command]` yang menjangkau `insert_song`**.
+
+Dan satu koreksi terhadap doc yang ada: kedua sumbu **tidak** setara. Loop insert memakai ulang satu prepared statement, jadi jumlah section adalah biaya WAL dan waktu yang linear, bukan amplifikasi heap. **Yang berbahaya adalah `content`, bukan cacahnya.**
+
+**`deleted_at`: keputusan yang benar dengan bentuk yang tidak dapat menyatakannya.** Baca mengembalikan baris bernisan, sebab jalur pemulihan wajib dapat membaca apa yang ia pulihkan, dan parameter `include_deleted: bool` adalah kesalahan yang disediakan di setiap call site dan dideteksi di nol — argumen yang sama yang [ADR-0043](decisions.md#adr-0043) pakai untuk menolak `resolve(token, language_code, rows)`. Yang harus dinyatakan terbuka adalah harganya: panggilan yang benar dan panggilan yang lupa **identik byte per byte**, sehingga filter yang hilang tidak terlihat di call site maupun di review. Dua akibat konkretnya dicatat di baris FR-701 dan FR-201, dan yang kedua menuntut filter di **dua** tempat sekaligus: `songs_fts` adalah virtual table dan **tidak dapat membawa foreign key**, sehingga baris indeks tidak hilang saat lagu dihapus.
+
+**Inventaris relasi lintas-induk lain di Appendix A.** Tidak satu pun disentuh FR-203; didaftar di sini supaya tidak perlu ditemukan ulang enam kali.
+
+| Relasi | Yang tidak terikat | Siapa yang membukanya |
+| --- | --- | --- |
+| `songs.default_arrangement_id` | **Nol FK.** Trigger hanya menjaga arah tulis-ke-`songs`; hapus arrangement meninggalkan referensi gantung | **FR-204** (hapus arrangement), FR-202 (hard-delete) |
+| `arrangement_items.section_id` | Tidak terikat ke `song_arrangements.song_id`; arrangement lagu A boleh menunjuk section lagu B | **FR-703** (penulis), **FR-204** (pembaca) |
+| `taggables.entity_id` | **Nol FK.** `entity_type` di-CHECK, `entity_id` tidak mereferensi apa pun; menghapus induk meninggalkan tag yatim | Item tagging FR-209, FR-202 |
+| `songs_fts.song_id` | Virtual table tidak dapat membawa FK; nol yang mencabut baris indeks saat lagu dihapus | **FR-201** — dan inilah yang menjadikan `deleted_at` jalur pengungkapan nyata |
+| `deck_slides.slide_index` vs `imported_decks.slide_count` | Nol constraint; deck boleh mengklaim 40 slide dan memuat 3 | FR-505, FR-506 |
+| `bible_verses.chapter/verse` vs `bible_books.chapter_count` | Nol CHECK, bahkan nol `> 0` | Impor FR-208, konsumen FR-206 |
+| `bible_book_names.language_code` vs `bible_versions.language_code` | Tidak terikat; versi bahasa X boleh diresolusi dengan nama kitab bahasa Y | FR-206, FR-207 |
+| `template_media` vs isi JSON `templates.document` | Junction tidak terikat pada media yang dokumen benar-benar rujuk | FR-705 (relink-by-hash) |
+
+**Dan kolom berbentuk path hanya dijaga komentar.** `media_assets.relative_path`, `deck_slides.image_path`/`thumb_path`, `templates.thumbnail_path`, `imported_decks.source_path`, `recent_sessions.file_path` — nol CHECK menuntut nilai-nilai ini relatif. Siapa pun yang menggabungkannya dengan sebuah root wajib mengkanonikalisasi lebih dulu (NFR-15): `.aero` atau database asing dapat menaruh `..\..\..\Windows\…` atau path absolut di sana. FR-203 tidak menyentuh satu pun kolom ini; dicatat untuk modul `queries/` berikutnya, yang akan menyalin bentuk berkasnya.
+
+**Yang membatalkan keputusan ini.** Migrasi yang benar-benar menambahkan FK yang hilang. Saat itu baris pertama tabel di atas berpindah dari "dijaga kode aplikasi" ke "dijaga skema", dan cek Rust yang bersangkutan menjadi sabuk pengaman alih-alih satu-satunya penjaga — tetapi hanya baris itu, dan hanya bila migrasinya juga membersihkan baris gantung yang sudah terlanjur ada.

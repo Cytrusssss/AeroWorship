@@ -1,0 +1,700 @@
+//! Songs, their sections and their arrangements (FR-203, Appendix A).
+//!
+//! FR-203 is one sentence — "songs are stored as an ordered set of labelled
+//! sections, not as a single text blob" — with one acceptance criterion: *a
+//! section's text is stored exactly once regardless of how many times it is
+//! sung*. Appendix A already has the shape that makes that true; this module is
+//! the typed way in and out of it. The repetition lives in
+//! `arrangement_items`, whose primary key is `(arrangement_id, position)`
+//! precisely so the same `section_id` may appear at several positions, and
+//! `song_sections` never grows a row because of it.
+//!
+//! Five decisions are taken here that the reader should not have to infer.
+//!
+//! ── 1. `content` is stored **exactly as handed in**. ─────────────────────
+//!
+//! The column is annotated `-- newline-separated lines`, and it would be easy
+//! to read that as a promise this module should enforce by rewriting every line
+//! separator to `\n` on the way in. It does not, and the reason is that there
+//! would then be **two** authorities on what a line is.
+//!
+//! [`crate::models::split_slides`] is the one that matters, and it counts seven
+//! separators, not one: `\n`, `\r\n` (as a single break), a lone `\r`, U+000B,
+//! U+000C, U+0085, U+2028 and U+2029 — the UAX #14 mandatory-break classes,
+//! chosen because they are what `white-space: pre` actually breaks on
+//! (ADR-0047). **That function is the sole authority on the meaning of "line",
+//! and this column is storage.** Normalising here would buy nothing for the
+//! consumer that matters — it counts all seven anyway — while claiming an
+//! invariant this layer cannot keep: FR-202's update path, FR-604's online
+//! import and FR-701's `.aero` import are all further ways a row reaches this
+//! column, and a row already in a church's database was never normalised at
+//! all. An invariant guarded by exactly one of several entry paths has stopped
+//! being an invariant (ADR-0045).
+//!
+//! It is also the "reject, never repair" stance `models::template` already
+//! takes, applied to text rather than to numbers. A U+2028 in a paste from a
+//! browser is a line break the *source document* chose; silently rewriting the
+//! operator's stored text is a repair, and a repaired value round-trips out of
+//! an `.aero` export (FR-706) as something nobody typed.
+//!
+//! **The consequence binds every reader of this column**, so it is stated
+//! rather than left to be discovered: `content` may hold any of those seven,
+//! and `str::lines` sees only one of them. Anything that needs to count lines
+//! calls `split_slides`.
+//!
+//! ── 2. Ids and timestamps are **arguments**, never generated here. ───────
+//!
+//! [`Song::id`], [`Song::created_at`], [`Song::updated_at`] and their siblings
+//! are fields the caller fills. This module names no clock and no random
+//! number generator, which is why the same input twice produces the same two
+//! rows and a test can assert on them. It is the shape `BookIndex` already has
+//! (ADR-0043) and the shape `split_slides` was given by removing a parameter it
+//! would have ignored (ADR-0046): the pure part takes what it needs as data,
+//! and the shell supplies the real values.
+//!
+//! Appendix A wants a UUIDv7 in `id` and an ISO-8601 UTC string in the
+//! timestamps. Neither is checked here — the format of an id is not something
+//! this module can distinguish from a legitimate id it has never seen, and
+//! inventing a rule would refuse rows Appendix A allows. Whoever mints them
+//! owes that.
+//!
+//! ── 3. Section order is the **position in the `Vec`**. ───────────────────
+//!
+//! [`SongSection`] has no `sort_order` field. `song_sections.sort_order` is
+//! filled from the index of the section in [`Song::sections`] on the way in,
+//! and the read path returns them in that order.
+//!
+//! The alternative — a caller-supplied `sort_order` — is refused because
+//! nothing in the schema makes it unique. Two sections sharing `sort_order`
+//! would come back in an order the caller never chose, with no error anywhere:
+//! the silent-and-wrong class this repository keeps paying for. Making the
+//! `Vec` authoritative makes that unrepresentable. The column stays what its
+//! own comment says it is — "authoring order only" — and the cost is stated:
+//! a caller that wants gaps in the numbering, to preserve a foreign system's
+//! section numbers, cannot express it. Nothing in the PRD asks for that.
+//!
+//! [`ArrangementItem::position`] is the opposite call, for a reason in the
+//! schema rather than in taste: `position` is *in* the primary key, so a
+//! duplicate is a loud constraint failure rather than a silent reordering, and
+//! FR-204 may legitimately want a numbering with gaps.
+//!
+//! ── 4. Reading a song **returns it even when it is soft-deleted**. ───────
+//!
+//! [`load_song`] does not filter on `deleted_at`; it returns the row and puts
+//! the tombstone in [`Song::deleted_at`] for the caller to see. FR-202 promises
+//! a 30-day recovery window, and a restore path has to be able to *read* what
+//! it restores — a filter here would make that impossible through this function
+//! and invite a second, unfiltered reader beside it.
+//!
+//! The paths that must hide deleted songs are the list and the search
+//! (FR-201, FR-202), and Appendix A already leans that way for them:
+//! `idx_songs_title` is a partial index on `deleted_at IS NULL`. Those items
+//! own the filter. This one owns the fact.
+//!
+//! ── 5. Nothing here touches `songs_fts`. ────────────────────────────────
+//!
+//! See `super`. FR-201 owns the index, including backfilling the songs written
+//! before it exists.
+//!
+//! ── Who bounds the input ────────────────────────────────────────────────
+//!
+//! Nothing in this module. There is no ceiling on the length of a title, a
+//! label or a section's `content`, nor on how many sections a song may have —
+//! but the two are **not** the same risk, and reading them as one sentence
+//! points the reader at the cheaper of them.
+//!
+//! *How many sections* is a linear cost. The insert loop below reuses a single
+//! prepared statement, so N sections are N bindings, N WAL frames and time; no
+//! heap amplification.
+//!
+//! *How long `content` is* is the dangerous axis. `params!` binds a `&String`
+//! as text with `SQLITE_TRANSIENT`, so **SQLite copies the buffer**: the peak
+//! is roughly twice the size of `content`, on top of the WAL frames held until
+//! the commit.
+//!
+//! And `SQLITE_MAX_LENGTH` — 1 GB by default — is the only limit a 50 MB paste
+//! would *meet*, which is true and, said alone, misleading: it is 45× the
+//! whole 22 MB the Rust host process is given by NFR-01's memory budget (PRD
+//! §5.1). The process is what gives way first, and long before SQLite objects.
+//!
+//! The bound belongs to the boundaries that have one to give — the IPC surface
+//! (FR-202) and the file-size limits on the import paths (FR-701, FR-604) —
+//! because the right number differs per call site and one chosen here could not
+//! be raised by a caller that needed it larger. Naming a bounder does not
+//! cancel a write, so the trigger is written down instead of left as an
+//! intention: the first commit that registers a `#[tauri::command]` reaching
+//! [`insert_song`] owes the limit (ADR-0049). Stated because a function that
+//! accepts untrusted input owes the reader the name of whoever bounds it
+//! (ADR-0047).
+
+use rusqlite::{params, Connection, OptionalExtension};
+
+use crate::db::error::DbError;
+
+/// The nine values `song_sections.section_type` allows.
+///
+/// Listed in Appendix A's own order so the two can be diffed by eye. The
+/// `CHECK` constraint in the schema and this enum have to agree; the enum is
+/// what stops a caller writing a tenth spelling and only finding out at the
+/// constraint, and what stops a reader treating the column as free text.
+///
+/// The type is a *classification*, not the label. A song may have "Verse 1",
+/// "Verse 2" and "Verse 3", all [`SectionType::Verse`]; the label is what the
+/// operator sees, the type is what a template or a report groups by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SectionType {
+    /// A numbered verse.
+    Verse,
+    /// The refrain.
+    Chorus,
+    /// A bridge.
+    Bridge,
+    /// A pre-chorus, sometimes called a rise or a channel.
+    PreChorus,
+    /// A short repeated tag.
+    Tag,
+    /// A closing section.
+    Ending,
+    /// An instrumental or spoken introduction.
+    Intro,
+    /// An instrumental passage between sung sections.
+    Interlude,
+    /// Anything the eight above do not describe.
+    Other,
+}
+
+impl SectionType {
+    /// The spelling stored in the column, which is the spelling the `CHECK`
+    /// constraint lists.
+    ///
+    /// This is not a display label: it is `pre_chorus`, not "Pre-Chorus". What
+    /// an operator reads comes from `label`, or from the frontend.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Verse => "verse",
+            Self::Chorus => "chorus",
+            Self::Bridge => "bridge",
+            Self::PreChorus => "pre_chorus",
+            Self::Tag => "tag",
+            Self::Ending => "ending",
+            Self::Intro => "intro",
+            Self::Interlude => "interlude",
+            Self::Other => "other",
+        }
+    }
+
+    /// The inverse of [`SectionType::as_str`], for a value read back out of the
+    /// column.
+    ///
+    /// Exact match, no case folding and no trimming: the schema's `CHECK` is a
+    /// literal `IN` list under SQLite's default `BINARY` collation, so `Verse`
+    /// and `verse ` are values that column cannot hold. Accepting them here
+    /// would be a rule this module enforces on the way out and the schema does
+    /// not on the way in.
+    ///
+    /// `None` means the row is not one Appendix A could have produced; the read
+    /// path turns that into [`DbError::UnknownSectionType`] rather than
+    /// guessing [`SectionType::Other`].
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "verse" => Some(Self::Verse),
+            "chorus" => Some(Self::Chorus),
+            "bridge" => Some(Self::Bridge),
+            "pre_chorus" => Some(Self::PreChorus),
+            "tag" => Some(Self::Tag),
+            "ending" => Some(Self::Ending),
+            "intro" => Some(Self::Intro),
+            "interlude" => Some(Self::Interlude),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+/// One labelled block of a song's lyrics, stored exactly once (FR-203).
+///
+/// Its order within the song is its position in [`Song::sections`]; see the
+/// head of this module for why there is no `sort_order` field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SongSection {
+    /// Stable id, supplied by the caller. Referenced by `arrangement_items`,
+    /// so it outlives any particular arrangement.
+    pub id: String,
+    /// What the operator calls this section: "Verse 1", "Chorus", "Bridge".
+    /// Unique within the song — `song_sections` has `UNIQUE (song_id, label)` —
+    /// and compared byte for byte, so "Chorus" and "chorus" are two labels.
+    pub label: String,
+    /// What kind of section it is, independent of what it is called.
+    pub section_type: SectionType,
+    /// The lyric text, stored verbatim.
+    ///
+    /// **May contain any of the seven line separators `split_slides` counts,
+    /// not just `\n`** — see the head of this module. Untrusted: it is whatever
+    /// a paste, an import or another program's `.aero` file contained, and it
+    /// must reach a DOM as a text node, never as markup (ADR-0042).
+    pub content: String,
+}
+
+/// A song, with its sections in the order they were authored in.
+///
+/// The same type is what [`insert_song`] writes and what [`load_song`] returns,
+/// so a song that goes in comes back equal to itself. That is a stronger claim
+/// than two near-identical structs would allow, and it is the reason `id` and
+/// the timestamps are ordinary fields: whoever mints them puts them here.
+///
+/// Arrangements are deliberately *not* a field. [`insert_song`] would then have
+/// to either write them — it cannot, an arrangement's items reference sections
+/// that do not exist until this call commits — or ignore them, and a field a
+/// function provably ignores invites the caller to believe it was used
+/// (ADR-0046). They are read and written through [`Arrangement`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Song {
+    /// Stable id, supplied by the caller. Appendix A expects a UUIDv7; this
+    /// module does not check that.
+    pub id: String,
+    /// The title as the operator entered it.
+    pub title: String,
+    /// A second title the song is also known by, if any.
+    pub alternate_title: Option<String>,
+    /// CCLI licence number, for churches that report their usage (FR-605).
+    pub ccli_number: Option<String>,
+    /// The copyright line to display under the lyrics.
+    pub copyright_text: Option<String>,
+    /// Musical key, as free text — "G", "Bb", "F#m".
+    pub song_key: Option<String>,
+    /// Tempo in beats per minute.
+    pub tempo_bpm: Option<i64>,
+    /// The arrangement used when nothing else is chosen (FR-204).
+    ///
+    /// **Must be `None` at insert time.** Appendix A's insert trigger rejects
+    /// any other value, and necessarily so: an arrangement of a song that does
+    /// not exist yet cannot exist either. [`insert_song`] refuses it up front
+    /// with [`DbError::DefaultArrangementAtInsert`] so the reason is legible.
+    pub default_arrangement_id: Option<String>,
+    /// Where an imported song came from — the provider's name (FR-605).
+    pub source_provider: Option<String>,
+    /// The URL it was retrieved from (FR-605).
+    pub source_url: Option<String>,
+    /// When it was retrieved, ISO-8601 UTC.
+    pub retrieved_at: Option<String>,
+    /// When the song was created, ISO-8601 UTC. Supplied by the caller.
+    pub created_at: String,
+    /// When it was last modified, ISO-8601 UTC. Supplied by the caller.
+    pub updated_at: String,
+    /// When it was soft-deleted, ISO-8601 UTC, or `None` while it is live
+    /// (FR-202).
+    ///
+    /// [`load_song`] returns soft-deleted songs; this field is how the caller
+    /// knows. Listing and search must exclude them — see the head of this
+    /// module.
+    pub deleted_at: Option<String>,
+    /// The song's sections, in authoring order. The position in this `Vec` is
+    /// what is stored in `sort_order`.
+    pub sections: Vec<SongSection>,
+}
+
+/// One entry in an arrangement: play this section next.
+///
+/// The same `section_id` may appear at any number of positions, and that is the
+/// point of FR-203 — "Verse 1, Chorus, Verse 2, Chorus, Chorus" is five entries
+/// over four sections, and the chorus's text is stored once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrangementItem {
+    /// Where in the arrangement this entry sits. Part of the primary key
+    /// together with the arrangement, so two entries cannot share one.
+    ///
+    /// The read path orders by it. It need not be contiguous; nothing here
+    /// requires that, because a gap changes no order.
+    pub position: i64,
+    /// The section to play. Must belong to the same song as the arrangement —
+    /// a constraint the schema does not express, so [`insert_arrangement`]
+    /// checks it.
+    pub section_id: String,
+}
+
+/// A named order in which a song's sections are sung (FR-204).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Arrangement {
+    /// Stable id, supplied by the caller.
+    pub id: String,
+    /// The song this arrangement belongs to.
+    ///
+    /// Redundant when the arrangement was obtained from
+    /// [`load_arrangements`], which was already given the song. It is carried
+    /// anyway so one type serves both directions: [`insert_arrangement`] needs
+    /// it, and it is what every `section_id` is checked against.
+    pub song_id: String,
+    /// What the operator calls it: "Default", "Short version". Unique within
+    /// the song.
+    pub name: String,
+    /// When it was created, ISO-8601 UTC. Supplied by the caller.
+    pub created_at: String,
+    /// The sections to play, in order.
+    pub items: Vec<ArrangementItem>,
+}
+
+/// Writes a song and all of its sections, in one transaction.
+///
+/// Either the song row and every section row land, or none of them do: a
+/// half-written song is worse than a song that failed to write, because it
+/// looks like a song.
+///
+/// Two refusals happen **before** the transaction opens, so a rejected song
+/// costs no database work and the diagnostic names the thing to fix rather than
+/// the constraint that tripped:
+///
+/// * a `default_arrangement_id` that is not `None`
+///   ([`DbError::DefaultArrangementAtInsert`]),
+/// * two sections sharing a label ([`DbError::DuplicateSectionLabel`]).
+///
+/// **Insert, not upsert.** A song whose id already exists fails on the primary
+/// key. Update — and with it the question of what happens to a section that
+/// disappeared from the list — is FR-202's, which owns `upsert_song`.
+///
+/// **The duplicate-label check covers this function's input and nothing
+/// else.** It compares the sections handed in against each other; it cannot see
+/// rows already in the table, which is sound here only because the song is new.
+/// Any later path that adds a section to an existing song must check against
+/// the table or map the `UNIQUE` failure itself — the second-entry-path shape
+/// ADR-0045 named.
+///
+/// **A song may be inserted already tombstoned.** [`Song::deleted_at`] is
+/// bound exactly as handed in, so `Some(…)` writes a song that was never
+/// visible. That is deliberate, and it is for one kind of caller: `.aero`
+/// import (FR-701, FR-703) and any restore-from-backup path have to reproduce
+/// a library as it was, and a song whose tombstone is dropped on the way in
+/// reappears in somebody's set list. The price is stated because it compounds
+/// with decision 4 at the head of this module: such a song is in no list
+/// (FR-201 and FR-202 filter on `deleted_at IS NULL`) and no operator deleted
+/// it, so no operator will restore it either — it is reachable only through
+/// [`load_song`] by id. Whoever mints the record owes that decision; this
+/// module does not second-guess it, for the same reason it does not validate
+/// an id.
+pub fn insert_song(conn: &mut Connection, song: &Song) -> Result<(), DbError> {
+    if song.default_arrangement_id.is_some() {
+        return Err(DbError::DefaultArrangementAtInsert {
+            song_id: song.id.clone(),
+        });
+    }
+    if let Some(label) = first_repeated_label(&song.sections) {
+        return Err(DbError::DuplicateSectionLabel {
+            song_id: song.id.clone(),
+            label: label.to_owned(),
+        });
+    }
+
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO songs (
+             id, title, alternate_title, ccli_number, copyright_text, song_key,
+             tempo_bpm, default_arrangement_id, source_provider, source_url,
+             retrieved_at, created_at, updated_at, deleted_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            song.id,
+            song.title,
+            song.alternate_title,
+            song.ccli_number,
+            song.copyright_text,
+            song.song_key,
+            song.tempo_bpm,
+            // Proved `None` above. Bound rather than written as a literal
+            // `NULL`, so this statement stores what the record says and the
+            // schema's insert trigger stays the backstop it was written to be.
+            song.default_arrangement_id,
+            song.source_provider,
+            song.source_url,
+            song.retrieved_at,
+            song.created_at,
+            song.updated_at,
+            song.deleted_at,
+        ],
+    )?;
+
+    {
+        let mut insert = tx.prepare(
+            "INSERT INTO song_sections (id, song_id, label, section_type, content, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        // Counted in `i64` — the column's own type — by zipping an ascending
+        // range rather than casting `enumerate`'s `usize`. There is no cast to
+        // reason about and no unreachable overflow arm to write.
+        for (sort_order, section) in (0i64..).zip(&song.sections) {
+            insert.execute(params![
+                section.id,
+                song.id,
+                section.label,
+                section.section_type.as_str(),
+                section.content,
+                sort_order,
+            ])?;
+        }
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+/// Reads a song and its sections, in `sort_order`.
+///
+/// `Ok(None)` means no song has that id. **A soft-deleted song is returned**,
+/// with [`Song::deleted_at`] set — see the head of this module for why that is
+/// the right answer here and whose job the filtering is.
+///
+/// [`Song::default_arrangement_id`] is whatever the row holds; a song read back
+/// after FR-204 has pointed it at an arrangement therefore cannot be handed
+/// straight to [`insert_song`], which refuses a non-`None` value. That is not a
+/// round-trip this function promises: a song that already exists is an update,
+/// and updates are FR-202's.
+pub fn load_song(conn: &Connection, song_id: &str) -> Result<Option<Song>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, alternate_title, ccli_number, copyright_text, song_key,
+                tempo_bpm, default_arrangement_id, source_provider, source_url,
+                retrieved_at, created_at, updated_at, deleted_at
+         FROM songs WHERE id = ?1",
+    )?;
+    let song = stmt
+        .query_row([song_id], |row| {
+            Ok(Song {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                alternate_title: row.get(2)?,
+                ccli_number: row.get(3)?,
+                copyright_text: row.get(4)?,
+                song_key: row.get(5)?,
+                tempo_bpm: row.get(6)?,
+                default_arrangement_id: row.get(7)?,
+                source_provider: row.get(8)?,
+                source_url: row.get(9)?,
+                retrieved_at: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+                deleted_at: row.get(13)?,
+                sections: Vec::new(),
+            })
+        })
+        .optional()?;
+
+    match song {
+        None => Ok(None),
+        Some(mut song) => {
+            song.sections = load_sections(conn, song_id)?;
+            Ok(Some(song))
+        }
+    }
+}
+
+/// Reads one song's sections, in `sort_order`.
+///
+/// Ordered by `(sort_order, id)` rather than by `sort_order` alone. Written
+/// through [`insert_song`] the two can never tie — `sort_order` is the position
+/// in the `Vec` — but a row written by any other path can, and an order that
+/// depends on SQLite's choice of plan is an order two machines may disagree
+/// about. The tie-break costs nothing and makes the answer a fact rather than a
+/// coincidence.
+fn load_sections(conn: &Connection, song_id: &str) -> Result<Vec<SongSection>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, label, section_type, content
+         FROM song_sections WHERE song_id = ?1
+         ORDER BY sort_order, id",
+    )?;
+    let rows = stmt.query_map([song_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+
+    let mut sections = Vec::new();
+    for row in rows {
+        let (id, label, section_type, content) = row?;
+        let Some(section_type) = SectionType::from_db(&section_type) else {
+            return Err(DbError::UnknownSectionType {
+                section_id: id,
+                value: section_type,
+            });
+        };
+        sections.push(SongSection {
+            id,
+            label,
+            section_type,
+            content,
+        });
+    }
+    Ok(sections)
+}
+
+/// Writes an arrangement and its items, in one transaction.
+///
+/// Every `section_id` is checked to belong to [`Arrangement::song_id`] first,
+/// inside the same transaction, and a failure aborts the whole write with
+/// [`DbError::SectionNotInSong`]. The schema cannot express that constraint:
+/// `arrangement_items.section_id` references `song_sections(id)` and nothing
+/// ties it to the arrangement's song, so an arrangement of one song may point
+/// at another song's section with every foreign key satisfied — and editing
+/// that section's lyrics would then change a song nobody edited.
+///
+/// The check also covers a section id that exists nowhere, which the foreign
+/// key would catch as well; catching it here names the id instead of the
+/// constraint.
+///
+/// Repeating a `section_id` across positions is **not** an error. It is what
+/// FR-203 exists for.
+///
+/// Insert, not upsert, for the same reason as [`insert_song`]. Generating the
+/// default arrangement, and pointing `songs.default_arrangement_id` at it, are
+/// FR-204's.
+pub fn insert_arrangement(conn: &mut Connection, arrangement: &Arrangement) -> Result<(), DbError> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO song_arrangements (id, song_id, name, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            arrangement.id,
+            arrangement.song_id,
+            arrangement.name,
+            arrangement.created_at,
+        ],
+    )?;
+
+    {
+        let mut owner = tx.prepare("SELECT song_id FROM song_sections WHERE id = ?1")?;
+        let mut insert = tx.prepare(
+            "INSERT INTO arrangement_items (arrangement_id, position, section_id)
+             VALUES (?1, ?2, ?3)",
+        )?;
+        for item in &arrangement.items {
+            let owning_song: Option<String> = owner
+                .query_row([&item.section_id], |row| row.get(0))
+                .optional()?;
+            if owning_song.as_deref() != Some(arrangement.song_id.as_str()) {
+                // `tx` is dropped without `commit`, which rolls back — the
+                // arrangement row inserted above included.
+                return Err(DbError::SectionNotInSong {
+                    arrangement_id: arrangement.id.clone(),
+                    song_id: arrangement.song_id.clone(),
+                    section_id: item.section_id.clone(),
+                });
+            }
+            insert.execute(params![arrangement.id, item.position, item.section_id])?;
+        }
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+/// Reads one song's arrangements, each with its items in `position` order.
+///
+/// Arrangements come back ordered by `name`, which `UNIQUE (song_id, name)`
+/// makes a total order — so the answer does not depend on the query plan. An
+/// empty `Vec` means the song has no arrangements, which is every song until
+/// FR-204 creates the default one.
+///
+/// **This path does not re-check that each item's section belongs to
+/// `song_id`.** It returns whatever `arrangement_items` holds.
+/// [`insert_arrangement`] closes that hole for its own door and only for its
+/// own door; the schema cannot express the constraint at all.
+///
+/// **Why that differs from `load_sections`, which does check on read** and
+/// refuses a foreign `section_type` with [`DbError::UnknownSectionType`]: the
+/// two are not the same purchase. The `section_type` check is a comparison
+/// against a fixed list of nine strings on a row already in hand. This one
+/// would be **one extra query per item**, on the path FR-204 will use to
+/// expand every arrangement of every song, and the real owner is the *writer*
+/// — a cross-song item can only get into the table through a writer that
+/// skipped the check, and `.aero` import (FR-703) is the first such writer
+/// (ADR-0049). A read-side check would also be the wrong remedy: it would fail
+/// the whole read of an arrangement rather than fix the row.
+///
+/// **The consequence goes further than editing.** `songs.id` cascades:
+/// `songs → song_sections → arrangement_items`. So deleting song B removes one
+/// *position* from an arrangement of song A that pointed at B's section, and
+/// the service order comes back one item shorter than the operator left it,
+/// with nothing edited and nothing raised. Whoever hard-deletes a song
+/// (FR-202) inherits that.
+pub fn load_arrangements(conn: &Connection, song_id: &str) -> Result<Vec<Arrangement>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, created_at
+         FROM song_arrangements WHERE song_id = ?1
+         ORDER BY name",
+    )?;
+    let rows = stmt.query_map([song_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+
+    let mut arrangements = Vec::new();
+    for row in rows {
+        let (id, name, created_at) = row?;
+        arrangements.push(Arrangement {
+            id,
+            song_id: song_id.to_owned(),
+            name,
+            created_at,
+            items: Vec::new(),
+        });
+    }
+
+    // Filled in a second pass rather than inside the loop above: `stmt` holds a
+    // borrow of `conn` while its rows are being walked, and a nested prepare on
+    // the same connection would be a second live statement over the same
+    // borrow. Two passes are also what makes each arrangement's items a single
+    // ordered read.
+    for arrangement in &mut arrangements {
+        arrangement.items = load_arrangement_items(conn, &arrangement.id)?;
+    }
+    Ok(arrangements)
+}
+
+/// Reads one arrangement's items, in `position` order.
+///
+/// No tie-break is needed: `position` is part of the primary key, so it is
+/// unique within an arrangement and the order is total.
+fn load_arrangement_items(
+    conn: &Connection,
+    arrangement_id: &str,
+) -> Result<Vec<ArrangementItem>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT position, section_id
+         FROM arrangement_items WHERE arrangement_id = ?1
+         ORDER BY position",
+    )?;
+    let rows = stmt.query_map([arrangement_id], |row| {
+        Ok(ArrangementItem {
+            position: row.get(0)?,
+            section_id: row.get(1)?,
+        })
+    })?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row?);
+    }
+    Ok(items)
+}
+
+/// The first label that appears twice in `sections`, or `None`.
+///
+/// "First" is in the order the sections were handed in, so the same input
+/// always names the same label — a diagnostic that moves is a diagnostic
+/// nothing can assert on.
+///
+/// Compared byte for byte, because that is what the schema compares:
+/// `UNIQUE (song_id, label)` uses SQLite's default `BINARY` collation, so
+/// "Chorus" and "chorus" are two labels and this must not pretend otherwise.
+/// Refusing more than the schema refuses would be this module inventing a rule.
+fn first_repeated_label(sections: &[SongSection]) -> Option<&str> {
+    let mut seen = std::collections::BTreeSet::new();
+    for section in sections {
+        if !seen.insert(section.label.as_str()) {
+            return Some(&section.label);
+        }
+    }
+    None
+}
