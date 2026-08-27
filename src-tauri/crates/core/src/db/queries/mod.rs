@@ -22,9 +22,9 @@
 //!   `SQLITE_BUSY_SNAPSHOT`, and **waiting does not resolve it**: the snapshot
 //!   this transaction is reading is already stale, so `busy_timeout` cannot
 //!   help and the only way out is to roll the whole transaction back and run
-//!   it again. Both write paths in [`song`] are safe for a reason worth
-//!   stating rather than by luck — each inserts its parent row *before* it
-//!   reads anything, so the write lock is held from the first statement and no
+//!   it again. All three write paths in [`song`] are safe for a reason worth
+//!   stating rather than by luck — each inserts a row *before* it reads
+//!   anything, so the write lock is held from the first statement and no
 //!   upgrade happens. The first read-then-write path is FR-202's
 //!   `upsert_song`, and it owes an explicit choice: either
 //!   `transaction_with_behavior(TransactionBehavior::Immediate)`, which takes

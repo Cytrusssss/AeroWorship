@@ -1,4 +1,4 @@
-//! Songs, their sections and their arrangements (FR-203, Appendix A).
+//! Songs, their sections and their arrangements (FR-203, FR-204, Appendix A).
 //!
 //! FR-203 is one sentence — "songs are stored as an ordered set of labelled
 //! sections, not as a single text blob" — with one acceptance criterion: *a
@@ -20,9 +20,12 @@
 //!
 //! [`crate::models::split_slides`] is the one that matters, and it counts seven
 //! separators, not one: `\n`, `\r\n` (as a single break), a lone `\r`, U+000B,
-//! U+000C, U+0085, U+2028 and U+2029 — the UAX #14 mandatory-break classes,
-//! chosen because they are what `white-space: pre` actually breaks on
-//! (ADR-0047). **That function is the sole authority on the meaning of "line",
+//! U+000C, U+0085, U+2028 and U+2029 — the **four** UAX #14 mandatory-break
+//! classes BK, CR, LF and NL, chosen because they are what `white-space: pre`
+//! actually breaks on (ADR-0047). Four and not three: BK gives U+000B, U+000C,
+//! U+2028 and U+2029, CR gives U+000D, LF gives U+000A, and **U+0085 is class
+//! NL by itself** — a set checked against three classes comes out one character
+//! short, and U+0085 is the one that then looks like a mistake to remove. **That function is the sole authority on the meaning of "line",
 //! and this column is storage.** Normalising here would buy nothing for the
 //! consumer that matters — it counts all seven anyway — while claiming an
 //! invariant this layer cannot keep: FR-202's update path, FR-604's online
@@ -127,7 +130,7 @@
 //! accepts untrusted input owes the reader the name of whoever bounds it
 //! (ADR-0047).
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::db::error::DbError;
 
@@ -270,6 +273,11 @@ pub struct Song {
     /// any other value, and necessarily so: an arrangement of a song that does
     /// not exist yet cannot exist either. [`insert_song`] refuses it up front
     /// with [`DbError::DefaultArrangementAtInsert`] so the reason is legible.
+    ///
+    /// The column is filled by [`insert_song_with_default_arrangement`], which
+    /// writes the arrangement and points the row at it inside the transaction
+    /// that created the song — so this field is `None` on every value handed
+    /// *in*, and `Some` on most values read back.
     pub default_arrangement_id: Option<String>,
     /// Where an imported song came from — the provider's name (FR-605).
     pub source_provider: Option<String>,
@@ -347,6 +355,10 @@ pub struct Arrangement {
 ///   ([`DbError::DefaultArrangementAtInsert`]),
 /// * two sections sharing a label ([`DbError::DuplicateSectionLabel`]).
 ///
+/// Both refusals live in `refuse_uninsertable`, so
+/// [`insert_song_with_default_arrangement`] makes exactly the same two and
+/// neither can drift from the other.
+///
 /// **Insert, not upsert.** A song whose id already exists fails on the primary
 /// key. Update — and with it the question of what happens to a section that
 /// disappeared from the list — is FR-202's, which owns `upsert_song`.
@@ -371,6 +383,119 @@ pub struct Arrangement {
 /// module does not second-guess it, for the same reason it does not validate
 /// an id.
 pub fn insert_song(conn: &mut Connection, song: &Song) -> Result<(), DbError> {
+    refuse_uninsertable(song)?;
+
+    let tx = conn.transaction()?;
+    write_song(&tx, song)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Writes a song, its sections **and its default arrangement**, in one
+/// transaction (FR-204).
+///
+/// FR-204 says the default arrangement is "generated on creation", and that is
+/// atomic or it is nothing. A song that landed without its default arrangement
+/// is the same half-written state [`insert_song`] refuses to leave behind for
+/// sections — it *looks* like a song — except that no constraint marks it, so
+/// every later reader carries a case for it forever. The three statements
+/// [`insert_song`] and [`insert_arrangement`] would run as two calls therefore
+/// run here as one transaction, with the `UPDATE` that points
+/// `songs.default_arrangement_id` at the result as the third.
+///
+/// Their order is the only one the schema allows, and it is the order
+/// [`DbError::DefaultArrangementAtInsert`] spells out: insert the song with
+/// `NULL`, create the arrangement, then update. So `song` must still carry
+/// `default_arrangement_id: None` and is refused with that same error if it
+/// does not — this function chooses the value, and a caller that supplied one
+/// meant something this function does not do.
+///
+/// **`arrangement_id` and `created_at` are arguments**, for the reason
+/// decision 2 at the head of this module gives: nothing here reads a clock or
+/// invents an id. What is *generated* is the arrangement's contents, not its
+/// identity.
+///
+/// **One item per section, in the song's own order, numbered from 0.** Zero
+/// rather than one because `song_sections.sort_order` is already the index in
+/// [`Song::sections`], so for the default arrangement `position` and
+/// `sort_order` are the same number for the same section, and a reader diffing
+/// the two tables sees identity rather than an off-by-one to explain. Nothing
+/// depends on the choice — `position` only has to order, and it is allowed to
+/// have gaps (see [`ArrangementItem::position`]).
+///
+/// **A song with no sections still gets its default arrangement, empty.** The
+/// trigger allows it: it checks that the arrangement exists and belongs to this
+/// song, not that it plays anything. The alternative — skipping the write —
+/// costs more than it saves, because `default_arrangement_id IS NULL` would
+/// then mean either "written by a path that predates FR-204" or "had no
+/// sections at the time", two facts no reader can tell apart; and the first
+/// path that adds a section to such a song would have to create the arrangement
+/// as well, which is the second entry path ADR-0045 names. It would also
+/// quietly ignore the `arrangement_id` it was handed.
+///
+/// **Neither trigger on `songs` can fire on this path, which is why no error
+/// variant maps their message.** They `RAISE(ABORT, …)`, and that reaches a
+/// caller raw as `SqliteFailure(1811, "default_arrangement_id must belong to
+/// this song")` — the message [`DbError::DefaultArrangementAtInsert`] exists to
+/// keep out of sight. The `BEFORE INSERT` trigger's `WHEN` is false because the
+/// column is bound `NULL`, which `refuse_uninsertable` has already proved; the
+/// `BEFORE UPDATE OF default_arrangement_id` trigger's is false because the row
+/// it looks for — this id, this song — was inserted earlier in this same
+/// transaction. An `arrangement_id` that already names another song's
+/// arrangement never reaches the update either: it collides with
+/// `song_arrangements`' primary key first. A variant for a branch no input can
+/// reach is a case every reader has to rule out again.
+///
+/// The cross-song check inside `write_arrangement` is redundant here — every
+/// section was written to this song two statements earlier — and it is paid
+/// anyway, one primary-key lookup per section inside the open transaction. The
+/// alternative is a second writer for `arrangement_items`, which would have to
+/// be kept in step with the first.
+pub fn insert_song_with_default_arrangement(
+    conn: &mut Connection,
+    song: &Song,
+    arrangement_id: &str,
+    created_at: &str,
+) -> Result<(), DbError> {
+    refuse_uninsertable(song)?;
+
+    let arrangement = Arrangement {
+        id: arrangement_id.to_owned(),
+        song_id: song.id.clone(),
+        // The spelling `song_arrangements.name` gives as its own example.
+        // Written out here rather than named as a constant a test could import:
+        // a test that asserts against the constant asserts nothing about the
+        // string.
+        name: "Default".to_owned(),
+        created_at: created_at.to_owned(),
+        // Counted in `i64` the same way `sort_order` is, and from the same
+        // zero, so the two columns agree section by section.
+        items: (0i64..)
+            .zip(&song.sections)
+            .map(|(position, section)| ArrangementItem {
+                position,
+                section_id: section.id.clone(),
+            })
+            .collect(),
+    };
+
+    let tx = conn.transaction()?;
+    write_song(&tx, song)?;
+    write_arrangement(&tx, &arrangement)?;
+    tx.execute(
+        "UPDATE songs SET default_arrangement_id = ?1 WHERE id = ?2",
+        params![arrangement.id, song.id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The two refusals both insert paths make **before** opening a transaction.
+///
+/// Extracted rather than repeated so the pair cannot drift, and kept out of
+/// [`write_song`] so that it stays true of both callers that a rejected song
+/// costs no database work at all.
+fn refuse_uninsertable(song: &Song) -> Result<(), DbError> {
     if song.default_arrangement_id.is_some() {
         return Err(DbError::DefaultArrangementAtInsert {
             song_id: song.id.clone(),
@@ -382,8 +507,22 @@ pub fn insert_song(conn: &mut Connection, song: &Song) -> Result<(), DbError> {
             label: label.to_owned(),
         });
     }
+    Ok(())
+}
 
-    let tx = conn.transaction()?;
+/// Writes the `songs` row and its `song_sections` rows into an open
+/// transaction.
+///
+/// Split out of [`insert_song`] so that
+/// [`insert_song_with_default_arrangement`] reuses these statements instead of
+/// holding a second copy of them — a second copy is a second place a column has
+/// to be added. It takes a [`Transaction`] rather than a `Connection` so that
+/// it *cannot* commit: which writes belong together is the caller's decision,
+/// and both callers make it in one visible place.
+///
+/// It assumes [`refuse_uninsertable`] has already returned `Ok`. The `NULL`
+/// bound into `default_arrangement_id` below is only true because of that call.
+fn write_song(tx: &Transaction<'_>, song: &Song) -> Result<(), DbError> {
     tx.execute(
         "INSERT INTO songs (
              id, title, alternate_title, ccli_number, copyright_text, song_key,
@@ -431,7 +570,6 @@ pub fn insert_song(conn: &mut Connection, song: &Song) -> Result<(), DbError> {
         }
     }
 
-    tx.commit()?;
     Ok(())
 }
 
@@ -544,10 +682,29 @@ fn load_sections(conn: &Connection, song_id: &str) -> Result<Vec<SongSection>, D
 /// FR-203 exists for.
 ///
 /// Insert, not upsert, for the same reason as [`insert_song`]. Generating the
-/// default arrangement, and pointing `songs.default_arrangement_id` at it, are
-/// FR-204's.
+/// default arrangement, and pointing `songs.default_arrangement_id` at it,
+/// belong to [`insert_song_with_default_arrangement`], which reuses the
+/// statements below rather than repeating them.
 pub fn insert_arrangement(conn: &mut Connection, arrangement: &Arrangement) -> Result<(), DbError> {
     let tx = conn.transaction()?;
+    write_arrangement(&tx, arrangement)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Writes the `song_arrangements` row and its `arrangement_items` rows into an
+/// open transaction, checking each section's owner as it goes.
+///
+/// Split out of [`insert_arrangement`] for the reason [`write_song`] is split
+/// out of [`insert_song`], and with the same consequence: it cannot commit, so
+/// [`insert_song_with_default_arrangement`] can put this write and that one
+/// inside one transaction without either function knowing about the other.
+///
+/// The `song_arrangements` row goes in **before** the first section is read.
+/// That is what keeps this write lock-safe under the `BEGIN DEFERRED` `super`
+/// describes — the write lock is taken by the first statement, so the read that
+/// follows never has to upgrade a snapshot.
+fn write_arrangement(tx: &Transaction<'_>, arrangement: &Arrangement) -> Result<(), DbError> {
     tx.execute(
         "INSERT INTO song_arrangements (id, song_id, name, created_at)
          VALUES (?1, ?2, ?3, ?4)",
@@ -570,8 +727,10 @@ pub fn insert_arrangement(conn: &mut Connection, arrangement: &Arrangement) -> R
                 .query_row([&item.section_id], |row| row.get(0))
                 .optional()?;
             if owning_song.as_deref() != Some(arrangement.song_id.as_str()) {
-                // `tx` is dropped without `commit`, which rolls back — the
-                // arrangement row inserted above included.
+                // Returning here leaves the caller's `tx` un-committed, and
+                // dropping it rolls back — the arrangement row inserted above
+                // included, and on the `insert_song_with_default_arrangement`
+                // path the song and its sections with it.
                 return Err(DbError::SectionNotInSong {
                     arrangement_id: arrangement.id.clone(),
                     song_id: arrangement.song_id.clone(),
@@ -582,7 +741,6 @@ pub fn insert_arrangement(conn: &mut Connection, arrangement: &Arrangement) -> R
         }
     }
 
-    tx.commit()?;
     Ok(())
 }
 
@@ -590,8 +748,8 @@ pub fn insert_arrangement(conn: &mut Connection, arrangement: &Arrangement) -> R
 ///
 /// Arrangements come back ordered by `name`, which `UNIQUE (song_id, name)`
 /// makes a total order — so the answer does not depend on the query plan. An
-/// empty `Vec` means the song has no arrangements, which is every song until
-/// FR-204 creates the default one.
+/// empty `Vec` means the song has no arrangements, which is every song not
+/// written by [`insert_song_with_default_arrangement`].
 ///
 /// **This path does not re-check that each item's section belongs to
 /// `song_id`.** It returns whatever `arrangement_items` holds.
@@ -602,12 +760,20 @@ pub fn insert_arrangement(conn: &mut Connection, arrangement: &Arrangement) -> R
 /// refuses a foreign `section_type` with [`DbError::UnknownSectionType`]: the
 /// two are not the same purchase. The `section_type` check is a comparison
 /// against a fixed list of nine strings on a row already in hand. This one
-/// would be **one extra query per item**, on the path FR-204 will use to
-/// expand every arrangement of every song, and the real owner is the *writer*
-/// — a cross-song item can only get into the table through a writer that
-/// skipped the check, and `.aero` import (FR-703) is the first such writer
-/// (ADR-0049). A read-side check would also be the wrong remedy: it would fail
-/// the whole read of an arrangement rather than fix the row.
+/// would be **one extra query per item** *here*, because this function reads
+/// `arrangement_items` and nothing else; and the real owner is the *writer* — a
+/// cross-song item can only get into the table through a writer that skipped
+/// the check, and `.aero` import (FR-703) is the first such writer (ADR-0049).
+/// A read-side check would also be the wrong remedy: it would fail the whole
+/// read of an arrangement rather than fix the row.
+///
+/// **[`expand_arrangement`] does check, and that is not a contradiction of
+/// either half.** It joins `song_sections` for the text, so the owner arrives
+/// in the row it already fetched and the first reason costs it nothing. The
+/// second reason is what decides *which* of the two functions refuses: a read
+/// that fails cannot be the read a repair goes through, so this one keeps
+/// returning the table exactly as it stands — the same reason [`load_song`]
+/// returns a song someone soft-deleted.
 ///
 /// **The consequence goes further than editing.** `songs.id` cascades:
 /// `songs → song_sections → arrangement_items`. So deleting song B removes one
@@ -677,6 +843,121 @@ fn load_arrangement_items(
         items.push(row?);
     }
     Ok(items)
+}
+
+/// Expands an arrangement into the sequence of sections it plays, in
+/// `position` order and with every repetition materialised (FR-204).
+///
+/// `Ok(None)` means no arrangement has that id. `Ok(Some(vec![]))` means one
+/// does and plays nothing, which is what a song with no sections gets from
+/// [`insert_song_with_default_arrangement`]; the two are kept apart because
+/// collapsing them would answer an id that does not exist with a song that is
+/// merely empty.
+///
+/// **This stops at sections. It does not produce slides**, although FR-204's
+/// acceptance criterion says "slide sequence". Where a section breaks into
+/// slides is [`crate::models::split_slides`]'s alone to say (ADR-0046,
+/// ADR-0047), and it decides it from the template's text box — geometry this
+/// layer does not have and must not acquire to keep a phrase. Mapping this
+/// result through it is a composition the caller makes, one section at a time.
+///
+/// **"Editing a section's text updates every occurrence" is inherited here, not
+/// enforced.** Every occurrence's text is read from its `song_sections` row at
+/// the moment of this call, so a section played five times is five reads of one
+/// row and there is no copy for an update to miss. That is FR-203's
+/// decomposition doing the work; all this function owes the criterion is not to
+/// cache around it.
+///
+/// The price of materialising the repetitions is stated rather than left to be
+/// met: a section played N times is N copies of its `content` in the returned
+/// `Vec`. This is the only function in this module that materialises one
+/// stored row's text more than once, and it does not bound N — whoever bounds
+/// the input still bounds it, as the head of this module says.
+///
+/// **Two things can be wrong with an arrangement's items, and only one of them
+/// is visible from here.**
+///
+/// *A section belonging to another song* is visible, and is refused with
+/// [`DbError::SectionNotInSong`]. The join already fetches
+/// `song_sections.song_id` to get the text, so the check costs no extra query —
+/// which is the *cost* reason [`load_arrangements`] gives for not making it,
+/// and it does not carry over. Its other reason does, and it is what decides
+/// which of the two functions refuses: failing a read is no way to repair a
+/// row, so the read a repair would go through stays unfiltered, while this
+/// one — the projection of a song onto a screen — refuses to put another
+/// song's words under this song's title. That is FR-203's acceptance
+/// criterion inverted, arriving through the read door; the writer that let the
+/// row in owes the real fix (FR-703, ADR-0049).
+///
+/// *An item removed by a cascade* is **not** visible, and this function does
+/// not pretend otherwise. `arrangement_items.section_id` references
+/// `song_sections(id)` `ON DELETE CASCADE`, so hard-deleting song B deletes the
+/// *item rows* of song A's arrangement that pointed into B; it leaves no
+/// dangling id to detect, only a gap in `position` — and gaps are legal (see
+/// [`ArrangementItem::position`]), so a service order that comes back one item
+/// short is indistinguishable from one written that way. Proved against a
+/// connection rather than inferred from the DDL: positions 0, 1, 2, 3 with 2
+/// pointing into song B read back as 0, 1, 3 after `DELETE FROM songs`, with no
+/// row left behind and no error raised. Whoever hard-deletes a song (FR-202)
+/// inherits that.
+pub fn expand_arrangement(
+    conn: &Connection,
+    arrangement_id: &str,
+) -> Result<Option<Vec<SongSection>>, DbError> {
+    // Also the existence check: an arrangement with no items is a legal
+    // arrangement, so zero rows from the join below cannot stand in for one.
+    let mut owner = conn.prepare("SELECT song_id FROM song_arrangements WHERE id = ?1")?;
+    let Some(song_id) = owner
+        .query_row([arrangement_id], |row| row.get::<_, String>(0))
+        .optional()?
+    else {
+        return Ok(None);
+    };
+
+    let mut stmt = conn.prepare(
+        "SELECT s.id, s.label, s.section_type, s.content, s.song_id
+         FROM arrangement_items i
+         JOIN song_sections s ON s.id = i.section_id
+         WHERE i.arrangement_id = ?1
+         ORDER BY i.position",
+    )?;
+    let rows = stmt.query_map([arrangement_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+
+    let mut sections = Vec::new();
+    for row in rows {
+        let (id, label, section_type, content, owning_song) = row?;
+        // Checked before the type is parsed: which song's words these are is
+        // the graver fact about the row, and it is true of it whatever the
+        // type says.
+        if owning_song != song_id {
+            return Err(DbError::SectionNotInSong {
+                arrangement_id: arrangement_id.to_owned(),
+                song_id,
+                section_id: id,
+            });
+        }
+        let Some(section_type) = SectionType::from_db(&section_type) else {
+            return Err(DbError::UnknownSectionType {
+                section_id: id,
+                value: section_type,
+            });
+        };
+        sections.push(SongSection {
+            id,
+            label,
+            section_type,
+            content,
+        });
+    }
+    Ok(Some(sections))
 }
 
 /// The first label that appears twice in `sections`, or `None`.

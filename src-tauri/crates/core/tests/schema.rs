@@ -9,52 +9,10 @@
 //! so it lives as a Cargo integration test under `tests/` rather than inside
 //! the crate.
 
-use std::env::temp_dir;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+mod common;
 
-use aeroworship_core::db::open_and_migrate;
+use common::TempDb;
 use rusqlite::Connection;
-
-/// A real file on disk, not `:memory:` — see the same note in
-/// `src/db/connection.rs`'s test module for why that distinction matters
-/// here. Cleaned up on drop, including the `-wal`/`-shm` siblings, so nothing
-/// from this suite is ever a candidate for the `.gitignore` artefact patterns
-/// SETUP-06 added; it never writes inside the repository at all.
-struct TempDb {
-    path: PathBuf,
-}
-
-impl TempDb {
-    fn new(tag: &str) -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before 1970")
-            .as_nanos();
-        let path = temp_dir().join(format!(
-            "aeroworship-schema-test-{tag}-{}-{nanos}-{n}.db",
-            std::process::id()
-        ));
-        Self { path }
-    }
-
-    fn open(&self) -> Connection {
-        open_and_migrate(&self.path).expect("a fresh temp path should migrate cleanly")
-    }
-}
-
-impl Drop for TempDb {
-    fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let mut os = self.path.as_os_str().to_owned();
-            os.push(suffix);
-            let _ = std::fs::remove_file(PathBuf::from(os));
-        }
-    }
-}
 
 fn extended_code(err: &rusqlite::Error) -> Option<i32> {
     match err {

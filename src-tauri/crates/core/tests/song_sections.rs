@@ -11,86 +11,27 @@
 //! no public path can write, which is how the read path's defences against a
 //! foreign or hand-edited database are reached at all.
 //!
-//! ── The database fixture, and why it is shaped this way ─────────────────
+//! ── The database fixture ───────────────────────────────────────────
 //!
-//! This is the first suite in the repository that writes to tables, so the
-//! shape below is the one FR-201/202/204 are expected to copy. Four rules, each
-//! with a reason that has already cost something somewhere:
+//! `TempDb` used to live here, in the second of what became three copies.
+//! FR-204 extracted it to `tests/common/mod.rs`, as the note it replaced said
+//! whichever item landed next should; the reasons for a real temp file, for
+//! the `Drop` guard's siblings and for declaring the guard **before** the
+//! `Connection` are stated there and have not changed.
 //!
-//! * **A real file under the system temp directory, never `:memory:`.**
-//!   `db::open` sets `journal_mode = WAL`, which an in-memory database does not
-//!   honour; a suite on `:memory:` would be testing a connection the
-//!   application never has. `tests/schema.rs` made the same call for the same
-//!   reason.
-//! * **A `Drop` guard removes the file and its `-wal`/`-shm`/`-journal`
-//!   siblings.** Nothing this suite writes is ever a candidate for the
-//!   `.gitignore` artefact patterns, because nothing it writes is inside the
-//!   repository.
-//! * **`TempDb` is declared before the `Connection`.** Locals drop in reverse
-//!   declaration order, so the connection closes before the guard unlinks the
-//!   file. On Windows that ordering is not a nicety: unlinking a file with an
-//!   open handle fails, and the guard would leave the file behind while still
-//!   reporting success. Keep the two lines in this order.
-//! * **The fixture data is synthetic.** `L1`…`L4` and structural labels, no
-//!   real lyrics anywhere: `Verse 1` and `Chorus` are the *names of a song's
-//!   parts*, not its words.
-//!
-//! `tests/schema.rs` carries its own copy of `TempDb`. Two copies is where
-//! duplication is still cheaper than the coupling of a shared `tests/support`
-//! module every suite then has to keep compiling; the third copy is where that
-//! stops being true, so whichever of FR-201/202/204 lands first should extract
-//! it rather than paste it again.
+//! What stays here is the data: `L1`…`L4` and structural labels, no real
+//! lyrics anywhere — `Verse 1` and `Chorus` are the *names of a song's parts*,
+//! not its words.
 
-use std::env::temp_dir;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+mod common;
 
 use aeroworship_core::db::queries::song::{
     insert_arrangement, insert_song, load_arrangements, load_song, Arrangement, ArrangementItem,
     SectionType, Song, SongSection,
 };
-use aeroworship_core::db::{open_and_migrate, DbError};
+use aeroworship_core::db::DbError;
+use common::TempDb;
 use rusqlite::Connection;
-
-// ─────────────────────────────────────────────────────────────
-// Fixture
-// ─────────────────────────────────────────────────────────────
-
-/// A migrated database in a temporary file, removed when the guard drops.
-struct TempDb {
-    path: PathBuf,
-}
-
-impl TempDb {
-    fn new(tag: &str) -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before 1970")
-            .as_nanos();
-        let path = temp_dir().join(format!(
-            "aeroworship-song-test-{tag}-{}-{nanos}-{n}.db",
-            std::process::id()
-        ));
-        Self { path }
-    }
-
-    fn open(&self) -> Connection {
-        open_and_migrate(&self.path).expect("a fresh temp path should migrate cleanly")
-    }
-}
-
-impl Drop for TempDb {
-    fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let mut os = self.path.as_os_str().to_owned();
-            os.push(suffix);
-            let _ = std::fs::remove_file(PathBuf::from(os));
-        }
-    }
-}
 
 /// Fixed timestamps: nothing in `queries::song` reads a clock, and a fixture
 /// that did would make every assertion on a round-trip unrepeatable.
