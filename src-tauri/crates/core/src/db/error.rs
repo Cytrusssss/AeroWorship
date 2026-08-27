@@ -158,10 +158,21 @@ pub enum DbError {
     /// song may reference another song's section and every constraint is
     /// satisfied. Editing that section's text would then change a song whose
     /// lyrics nobody touched.
+    ///
+    /// **Raised on both a write path and a read path, and the fields mean
+    /// slightly different things on each.** `insert_arrangement` raises it to
+    /// refuse a row; `expand_arrangement` (FR-204) is the first *reader* to
+    /// raise it, and it refuses to project the row onto a screen. On the read
+    /// path the "or nowhere" half of `section_id` below is reachable in
+    /// practice — an id naming no `song_sections` row at all — which is why
+    /// that path uses an outer join instead of dropping such a row silently.
     SectionNotInSong {
-        /// Arrangement being written.
+        /// The arrangement the item belongs to: the one being written on the
+        /// write path, the one being expanded on the read path.
         arrangement_id: String,
-        /// Song that arrangement belongs to.
+        /// Song that arrangement belongs to. On the read path this is the song
+        /// the *caller* named, which the arrangement was already checked
+        /// against.
         song_id: String,
         /// Section it referred to, which belongs elsewhere or nowhere.
         section_id: String,

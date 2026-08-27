@@ -129,8 +129,14 @@ CREATE INDEX idx_arritems_section ON arrangement_items(section_id);
 -- `DELETE FROM song_arrangements` (1 row deleted, none left), and
 -- `default_arrangement_id` still reads back as that arrangement's id.
 --
--- Whose it is: **FR-204**, which opens the delete-an-arrangement path, and
--- FR-202 for hard delete. Closing it means adding the FK, which means
+-- Whose it is: the first item that actually **deletes a `song_arrangements`
+-- row** — FR-202's hard delete of a song, or an arrangement-CRUD item if one
+-- ever exists. **Not FR-204**, which this comment used to name: FR-204's
+-- requirement text is "an ordered sequence of references to that song's
+-- sections. A default arrangement is generated on creation" and says nothing
+-- about deleting anything. What FR-204 carries is the *write* direction of
+-- `default_arrangement_id`, and that direction is the one the two triggers
+-- below already hold. Closing the DELETE hole means adding the FK, which means
 -- rewriting the table in a *later* migration — this one is not edited
 -- (ADR-0049).
 CREATE TRIGGER trg_songs_default_arrangement_fk

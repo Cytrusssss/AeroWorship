@@ -142,10 +142,12 @@ fn stored_items(conn: &Connection, arrangement_id: &str) -> Vec<(i64, String)> {
         .collect()
 }
 
-fn expanded(conn: &Connection, arrangement_id: &str) -> Vec<SongSection> {
-    expand_arrangement(conn, arrangement_id)
+fn expanded(conn: &Connection, song_id: &str, arrangement_id: &str) -> Vec<SongSection> {
+    expand_arrangement(conn, song_id, arrangement_id)
         .expect("expand_arrangement must not fail on an arrangement this test just wrote")
-        .unwrap_or_else(|| panic!("arrangement {arrangement_id} was written and must expand"))
+        .unwrap_or_else(|| {
+            panic!("arrangement {arrangement_id} of {song_id} was written and must expand")
+        })
 }
 
 fn labels(sections: &[SongSection]) -> Vec<&str> {
@@ -313,7 +315,8 @@ fn a_song_with_no_sections_still_gets_an_empty_default_arrangement() {
     assert_eq!(default_id.as_deref(), Some("arr-2"));
 
     assert_eq!(
-        expand_arrangement(&conn, "arr-2").expect("expanding an empty arrangement is not an error"),
+        expand_arrangement(&conn, "song-2", "arr-2")
+            .expect("expanding an empty arrangement is not an error"),
         Some(Vec::new()),
         "an arrangement that plays nothing is Some([]), never None",
     );
@@ -343,7 +346,7 @@ fn an_unknown_arrangement_id_expands_to_none() {
     .unwrap();
 
     assert_eq!(
-        expand_arrangement(&conn, "arr-nowhere")
+        expand_arrangement(&conn, "song-3", "arr-nowhere")
             .expect("an unknown id is not an error, it is an absence"),
         None,
     );
@@ -414,7 +417,7 @@ fn expanding_an_arrangement_materialises_every_repetition_in_position_order() {
     )
     .expect("repeating a section id across positions is what FR-204 is for");
 
-    let sequence = expanded(&conn, "arr-full");
+    let sequence = expanded(&conn, "song-4", "arr-full");
     assert_eq!(
         labels(&sequence),
         vec!["Verse 1", "Chorus", "Verse 2", "Chorus", "Chorus"],
@@ -474,7 +477,7 @@ fn the_default_arrangement_expands_to_the_songs_sections_in_authoring_order() {
         .as_deref()
         .expect("creation must have pointed the song at its default arrangement");
 
-    let sequence = expanded(&conn, default_id);
+    let sequence = expanded(&conn, "song-5", default_id);
     assert_eq!(labels(&sequence), vec!["Verse 1", "Chorus", "Verse 2"]);
     assert_eq!(
         sequence, stored.sections,
@@ -544,7 +547,7 @@ fn editing_a_sections_text_updates_every_occurrence_and_copies_nothing() {
     )
     .unwrap();
 
-    let before = expanded(&conn, "arr-6");
+    let before = expanded(&conn, "song-6", "arr-6");
     assert_eq!(
         before.iter().filter(|s| s.id == "sec-c").count(),
         3,
@@ -558,7 +561,7 @@ fn editing_a_sections_text_updates_every_occurrence_and_copies_nothing() {
     )
     .expect("the edit must apply to the single stored row");
 
-    let after = expanded(&conn, "arr-6");
+    let after = expanded(&conn, "song-6", "arr-6");
     assert_eq!(
         contents(&after),
         vec!["L1", EDITED, "L3", EDITED, EDITED],
@@ -586,7 +589,7 @@ fn editing_a_sections_text_updates_every_occurrence_and_copies_nothing() {
     // The song's *other* arrangement — the default one — sees the same edit,
     // because it references the same row.
     assert_eq!(
-        contents(&expanded(&conn, "arr-6-default")),
+        contents(&expanded(&conn, "song-6", "arr-6-default")),
         vec!["L1", EDITED, "L3"],
         "every arrangement of the song sees the edit, not only the one expanded first",
     );
@@ -861,7 +864,7 @@ fn expanding_an_item_that_belongs_to_another_song_is_refused_by_name() {
     )
     .expect("the schema permits this row; that is the whole problem");
 
-    let err = expand_arrangement(&conn, "arr-a")
+    let err = expand_arrangement(&conn, "song-a", "arr-a")
         .expect_err("song A's arrangement may not play song B's words");
     match &err {
         DbError::SectionNotInSong {
@@ -948,7 +951,8 @@ fn a_cross_song_item_is_refused_before_its_section_type_is_parsed() {
     )
     .unwrap();
 
-    let err = expand_arrangement(&conn, "arr-a").expect_err("the row is wrong in two ways");
+    let err =
+        expand_arrangement(&conn, "song-a", "arr-a").expect_err("the row is wrong in two ways");
     match &err {
         DbError::SectionNotInSong { section_id, .. } => assert_eq!(section_id, "sec-b1"),
         other => panic!(
@@ -996,7 +1000,7 @@ fn an_unknown_section_type_reached_through_an_arrangement_is_refused_by_name() {
     conn.execute_batch("PRAGMA ignore_check_constraints = OFF;")
         .expect("the pragma must come back off");
 
-    let err = expand_arrangement(&conn, "arr-10")
+    let err = expand_arrangement(&conn, "song-10", "arr-10")
         .expect_err("a type this build cannot name must not be guessed");
     match &err {
         DbError::UnknownSectionType { section_id, value } => {
@@ -1005,6 +1009,260 @@ fn an_unknown_section_type_reached_through_an_arrangement_is_refused_by_name() {
         }
         other => panic!("expected UnknownSectionType naming sec-x, got {other:?}"),
     }
+}
+
+/// An arrangement that exists but belongs to **another song** is `Ok(None)`
+/// under this song's id, and expands normally under its own.
+///
+/// **Both directions are asserted, and neither alone is enough.** The first is
+/// green under an implementation that returns `None` for everything; the second
+/// is green under one that ignores `song_id` altogether — which is the shape
+/// this function had before `song_id` became an argument, when it derived the
+/// owner from the arrangement row and so made every answer internally
+/// consistent and none of them checked. A Control Panel holding `songId` and
+/// `arrangementId` as two pieces of UI state can send a stale pair, and the
+/// first assertion below is the whole of what stands between that and song B's
+/// words under song A's title.
+///
+/// `None` rather than an error variant of its own is deliberate: the pair the
+/// caller holds is simply not a pair, and the recovery — fall back to
+/// `default_arrangement_id` — is the same one an id that names nothing gets.
+/// `Some(vec![])` is the answer that stays reserved for an arrangement of
+/// *this* song that plays nothing, and
+/// [`a_song_with_no_sections_still_gets_an_empty_default_arrangement`] holds
+/// that end.
+#[test]
+fn another_songs_arrangement_is_none_here_and_expands_under_its_own_song() {
+    let db = TempDb::new("expand-wrong-owner");
+    let mut conn = db.open();
+
+    insert_song_with_default_arrangement(
+        &mut conn,
+        &song(
+            "song-a",
+            "Song A",
+            vec![section("sec-a1", "Verse 1", SectionType::Verse, "L1")],
+        ),
+        "arr-a",
+        T0,
+    )
+    .unwrap();
+    insert_song_with_default_arrangement(
+        &mut conn,
+        &song(
+            "song-b",
+            "Song B",
+            vec![
+                section("sec-b1", "Verse 1", SectionType::Verse, "L4"),
+                section("sec-b2", "Chorus", SectionType::Chorus, "L5"),
+            ],
+        ),
+        "arr-b",
+        T0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        expand_arrangement(&conn, "song-a", "arr-b")
+            .expect("a mismatched pair is an absence, not an error"),
+        None,
+        "song B's arrangement is not song A's arrangement, and answering with \
+         song B's sections would put them under song A's title",
+    );
+
+    let own = expand_arrangement(&conn, "song-b", "arr-b")
+        .expect("song B's own arrangement must read")
+        .expect("song B's own arrangement exists, so it is not an absence");
+    assert_eq!(labels(&own), vec!["Verse 1", "Chorus"]);
+    assert_eq!(contents(&own), vec!["L4", "L5"]);
+    assert_eq!(ids(&own), vec!["sec-b1", "sec-b2"]);
+}
+
+/// A `section_id` that names **no row at all** is refused by name, while
+/// `load_arrangements` keeps returning the very same item.
+///
+/// **The two public readers answer this row differently on purpose**, and both
+/// halves are asserted here so the pair is visible in one place: the read a
+/// repair would go through stays unfiltered, and the read that paints a
+/// projector refuses. What an inner join would do instead is the thing this
+/// test exists to forbid — drop the item without a trace, leaving the two
+/// readers disagreeing about the same arrangement with no error on either side.
+///
+/// **Making the row needs `foreign_keys = OFF` on a second connection**, and
+/// that is not a convenience: `db::open` sets the pragma `ON`, so on every
+/// connection this crate hands out the deletion below becomes an
+/// `ON DELETE CASCADE` that removes the *item* row and leaves nothing dangling
+/// — the case
+/// [`hard_deleting_a_song_silently_removes_it_from_another_songs_arrangement`]
+/// measures. With the pragma off the item outlives its section, which is the
+/// state a database written by something other than this program can be in, and
+/// the same threat model under which this module already refuses a stored
+/// `section_type` outside Appendix A's nine.
+#[test]
+fn a_dangling_section_id_is_refused_by_name_while_the_repair_read_still_returns_it() {
+    let db = TempDb::new("expand-dangling");
+    let mut conn = db.open();
+
+    insert_song_with_default_arrangement(
+        &mut conn,
+        &song(
+            "song-d",
+            "Song D",
+            vec![
+                section("sec-d1", "Verse 1", SectionType::Verse, "L1"),
+                section("sec-d2", "Chorus", SectionType::Chorus, "L2"),
+            ],
+        ),
+        "arr-d",
+        T0,
+    )
+    .unwrap();
+
+    {
+        let raw = db.open();
+        raw.pragma_update(None, "foreign_keys", "OFF")
+            .expect("the pragma must go off, on this connection only");
+        let deleted = raw
+            .execute("DELETE FROM song_sections WHERE id = ?1", ["sec-d2"])
+            .expect("with the pragma off the section row is deletable on its own");
+        assert_eq!(deleted, 1);
+    }
+
+    assert_eq!(
+        stored_items(&conn, "arr-d"),
+        vec![(0, "sec-d1".to_owned()), (1, "sec-d2".to_owned())],
+        "the premise: the item row outlived the section it names, so the id dangles",
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT COUNT(*) FROM song_sections WHERE id = ?1",
+            &["sec-d2"],
+        ),
+        0,
+        "and nothing is left for a join to find",
+    );
+
+    let arrangements =
+        load_arrangements(&conn, "song-d").expect("the unfiltered read must still succeed");
+    assert_eq!(
+        arrangements
+            .iter()
+            .flat_map(|a| a.items.iter().map(|i| i.section_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec!["sec-d1", "sec-d2"],
+        "the read a repair would go through returns the dangling item exactly as it stands",
+    );
+
+    let err = expand_arrangement(&conn, "song-d", "arr-d")
+        .expect_err("a section_id that names no row must be named, not silently dropped");
+    match &err {
+        DbError::SectionNotInSong {
+            arrangement_id,
+            song_id,
+            section_id,
+        } => {
+            assert_eq!(arrangement_id, "arr-d");
+            assert_eq!(song_id, "song-d");
+            assert_eq!(section_id, "sec-d2");
+        }
+        other => panic!(
+            "expected SectionNotInSong naming sec-d2 — 'belongs elsewhere or nowhere' covers \
+             both — got {other:?}"
+        ),
+    }
+}
+
+/// An arrangement deleted by **another connection** is `None`, not an
+/// arrangement that merely plays nothing.
+///
+/// This is the three-statement sequence `expand_arrangement`'s doc names as the
+/// test its single-statement shape is owed — *read the owner, delete from a
+/// second connection, count the items* — written out so that the claim is not a
+/// sentence with no artefact behind it. The shape this replaced read
+/// `song_arrangements` to learn that the arrangement exists and then
+/// `arrangement_items` for its contents, with no snapshot binding the two: the
+/// first statement below is that first read, it says yes, and after the delete
+/// the second returns no rows. That pair is `Ok(Some(vec![]))` — an arrangement
+/// that no longer exists, reported with the value reserved for one that exists
+/// and is empty.
+///
+/// No thread is needed, and that is the point of writing the interleaving out
+/// in this order rather than racing for it: the window the old shape left open
+/// is reproduced deterministically, and one `SELECT` closes it by answering both
+/// questions from one implicit read transaction.
+///
+/// **The empty arrangement asserted at the end is the control.** Without it the
+/// test is also green under an implementation that answers `None` to
+/// everything, which would destroy the distinction the first assertion defends.
+#[test]
+fn an_arrangement_deleted_by_another_connection_is_none_not_empty() {
+    let db = TempDb::new("expand-deleted-underfoot");
+    let mut conn = db.open();
+
+    insert_song_with_default_arrangement(
+        &mut conn,
+        &song(
+            "song-w",
+            "Song W",
+            vec![
+                section("sec-w1", "Verse 1", SectionType::Verse, "L1"),
+                section("sec-w2", "Chorus", SectionType::Chorus, "L2"),
+            ],
+        ),
+        "arr-w",
+        T0,
+    )
+    .unwrap();
+    insert_arrangement(
+        &mut conn,
+        &arrangement("arr-w-empty", "song-w", "Instrumental", &[]),
+    )
+    .expect("an arrangement with no items is a legal thing to write");
+
+    // Statement one of the shape this replaced: the arrangement exists, and it
+    // is this song's.
+    let owner: String = conn
+        .query_row(
+            "SELECT song_id FROM song_arrangements WHERE id = ?1",
+            ["arr-w"],
+            |row| row.get(0),
+        )
+        .expect("the arrangement row must exist at this point");
+    assert_eq!(owner, "song-w");
+
+    {
+        let other = db.open();
+        let deleted = other
+            .execute("DELETE FROM song_arrangements WHERE id = ?1", ["arr-w"])
+            .expect("a second connection may delete it between the two statements");
+        assert_eq!(deleted, 1);
+    }
+
+    // Statement two of that shape, run after the delete: no rows. Together with
+    // the `song-w` read above, that is exactly the pair the old shape reported
+    // as `Some([])`.
+    assert_eq!(
+        stored_items(&conn, "arr-w"),
+        Vec::<(i64, String)>::new(),
+        "the cascade took the items with the arrangement",
+    );
+
+    assert_eq!(
+        expand_arrangement(&conn, "song-w", "arr-w")
+            .expect("an arrangement that is gone is an absence, not an error"),
+        None,
+        "existence and contents come from one snapshot, so a deleted arrangement is \
+         None — never Some([]), which means an arrangement that exists and plays nothing",
+    );
+
+    assert_eq!(
+        expand_arrangement(&conn, "song-w", "arr-w-empty")
+            .expect("the surviving arrangement must still read"),
+        Some(Vec::new()),
+        "the control: an arrangement of this song that plays nothing is still Some([]), \
+         so the assertion above is about the delete and not about collapsing both answers",
+    );
 }
 
 /// A song written by `insert_song` alone has **no** arrangements and no
@@ -1070,10 +1328,20 @@ fn the_plain_insert_path_generates_no_arrangement() {
 /// says.
 ///
 /// **It also settles why `JOIN` → `LEFT JOIN` in `expand_arrangement` cannot
-/// be caught by any test.** A dangling `section_id` is what would make the two
-/// joins differ, and the cascade means one cannot exist: the row that would
-/// have dangled is gone with it. The zero-dangling assertion below is that
-/// premise written down as an assertion instead of inferred from the DDL.
+/// be caught *under this test's premise*, which is `foreign_keys = ON` — the
+/// pragma `db::open` sets and every path here runs with.** A dangling
+/// `section_id` is what would make the two joins differ, and under that pragma
+/// one cannot exist: the row that would have dangled is gone with the cascade.
+/// The zero-dangling assertion below is that premise written down as an
+/// assertion instead of inferred from the DDL.
+///
+/// **The premise is narrower than the code, and deliberately so.** With the
+/// pragma off a dangling id is writable, the two joins then differ, and
+/// `expand_arrangement` spends that difference on purpose: it refuses such a
+/// row with `SectionNotInSong` where an inner join would drop it silently. That
+/// case is
+/// [`a_dangling_section_id_is_refused_by_name_while_the_repair_read_still_returns_it`];
+/// this test says nothing about it.
 #[test]
 fn hard_deleting_a_song_silently_removes_it_from_another_songs_arrangement() {
     let db = TempDb::new("cascade-shortens");
@@ -1176,12 +1444,14 @@ fn hard_deleting_a_song_silently_removes_it_from_another_songs_arrangement() {
         .expect("the dangling-id query must run");
     assert_eq!(
         dangling, 0,
-        "no dangling section_id is left behind, which is why a LEFT JOIN in \
-         expand_arrangement cannot behave differently from a JOIN",
+        "no dangling section_id is left behind, which is why with foreign_keys = ON \
+         a LEFT JOIN in expand_arrangement cannot behave differently from a JOIN; \
+         with the pragma off they differ, and that difference is what the dangling-id \
+         test below is built on",
     );
 
     assert_eq!(
-        labels(&expanded(&conn, "arr-a")),
+        labels(&expanded(&conn, "song-a", "arr-a")),
         vec!["Verse 1", "Chorus", "Verse 2"],
         "the service order comes back one item shorter, with no error raised",
     );
