@@ -162,10 +162,22 @@ pub enum DbError {
     /// **Raised on both a write path and a read path, and the fields mean
     /// slightly different things on each.** `insert_arrangement` raises it to
     /// refuse a row; `expand_arrangement` (FR-204) is the first *reader* to
-    /// raise it, and it refuses to project the row onto a screen. On the read
-    /// path the "or nowhere" half of `section_id` below is reachable in
-    /// practice — an id naming no `song_sections` row at all — which is why
-    /// that path uses an outer join instead of dropping such a row silently.
+    /// raise it, and it refuses to project the row onto a screen.
+    ///
+    /// **The "or nowhere" half of `section_id` below — an id naming no
+    /// `song_sections` row at all — belongs mostly to the write path**, where
+    /// `insert_arrangement` looks each id up before inserting its item and
+    /// finds no owning song; that is the easy way to reach it and it is covered
+    /// there. On the **read** path it is not an ordinary state: `db::open` sets
+    /// `foreign_keys = ON` on every connection this crate hands out, and under
+    /// that pragma `ON DELETE CASCADE` takes the item row rather than orphaning
+    /// it, so a read reaches a dangling id only in a database written by
+    /// something other than SQLite or before the constraint existed — the same
+    /// threat model `UnknownSectionType` above is written for. An earlier
+    /// wording called it "reachable in practice", which reads as a normal state
+    /// and would stop a reader checking. `expand_arrangement` uses an outer
+    /// join for it regardless, so that such a row is refused by name instead of
+    /// dropped silently.
     SectionNotInSong {
         /// The arrangement the item belongs to: the one being written on the
         /// write path, the one being expanded on the read path.

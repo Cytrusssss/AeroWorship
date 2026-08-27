@@ -101,16 +101,31 @@
 //! in the result that says so. A stored service plan (FR-301) holding the
 //! arrangement id of a song deleted last month shows it whole.
 //!
+//! **And its `Ok(None)` leads back here by a second route**, which is why that
+//! function's doc names this decision and this decision names it: a caller
+//! recovering from a stale arrangement id the way that doc prescribes — fall
+//! back to [`Song::default_arrangement_id`] — reaches the tombstoned song's
+//! default arrangement and expands that instead. The fallback is not a way out
+//! of this decision; it is another door into it. The case that does stop the
+//! caller is the *hard*-deleted song, and it stops it by leaving no default id
+//! to read.
+//!
 //! **The position taken is that this stays**, and it is a decision rather than
 //! an omission. Refusing the read would break the preview a restore has to go
 //! through, which is the reason above; widening the return type to carry a
 //! tombstone would make every caller handle a state most of them cannot act on,
-//! and would still be advisory. What closes it instead is the `song_id`
-//! argument [`expand_arrangement`] takes: a caller that can name the song can
-//! call [`load_song`] and read [`Song::deleted_at`] — the same call the caller
-//! that displays a title has already had to make. **Whoever renders a stored
-//! service plan (FR-301) owes it.** This module cannot make it for them, and
-//! says so rather than leaving the gap to be found on a Sunday.
+//! and would still be advisory. **Nothing here closes it**, and the sentence
+//! that used to say otherwise was wrong. The `song_id` argument
+//! [`expand_arrangement`] takes is not the closure it was written to be: it
+//! lets the function check that the pair the caller holds is a pair, which is
+//! what its own doc claims for it, but it opens no channel for the tombstone.
+//! A caller holding a song id could always call [`load_song`] and read
+//! [`Song::deleted_at`] — before that argument existed and after — so the
+//! recovery is exactly as available, and exactly as easy to forget, as it ever
+//! was. **Whoever renders a stored
+//! service plan (FR-301) owes that call**, which is a hand-off rather than a
+//! fix; it is recorded on FR-301's own line so that it reaches a reader who
+//! will act on it, rather than only being found on a Sunday.
 //!
 //! ── 5. Nothing here touches `songs_fts`. ────────────────────────────────
 //!
@@ -119,17 +134,39 @@
 //!
 //! ── Who bounds the input ────────────────────────────────────────────────
 //!
-//! Nothing in this module, on **five** axes: the length of a `title`, the
-//! length of a `label`, the length of a section's `content`, how many sections
-//! a song has, and how many items an arrangement plays. None of the five has a
-//! ceiling here, and they are **not** the same risk — read as one sentence they
-//! point the reader at the cheapest of them, so they are separated below.
+//! Nothing in this module, and the claim is made over **columns** rather than
+//! over a list of interesting axes: **every TEXT column this module binds is
+//! unbounded here, save one**, and two counts are unbounded beside them.
 //!
-//! **The list is exhaustive on purpose.** Anything that forwards its bounding
-//! obligation "to the head of this module" forwards it to this list, so an axis
-//! missing from the list is an axis nobody was asked to bound. The fifth was
-//! missing until FR-204's audit, while the function that amplifies it forwarded
-//! its obligation here.
+//! The exception is `song_sections.section_type`, bound from
+//! [`SectionType::as_str`] and therefore never anything but one of Appendix A's
+//! nine spellings. The rest is caller text passed straight through — `songs`'
+//! thirteen (`id`, `title`, `alternate_title`, `ccli_number`,
+//! `copyright_text`, `song_key`, `default_arrangement_id`, `source_provider`,
+//! `source_url`, `retrieved_at`, `created_at`, `updated_at`, `deleted_at`),
+//! `song_sections`' `id`, `song_id`, `label` and `content`,
+//! `song_arrangements`' `id`, `song_id`, `name` and `created_at`, and
+//! `arrangement_items`' `arrangement_id` and `section_id`. The two counts are
+//! how many sections a song has and how many items an arrangement plays.
+//!
+//! **Over columns because the list of axes that stood here called itself
+//! exhaustive and was not.** It named five — `title`, `label`, `content`,
+//! section count, item count — and left out ten free-text `songs` columns and
+//! `song_arrangements.name`. That mattered for the reason the list gave for
+//! existing: anything that forwards its bounding obligation "to the head of
+//! this module" forwards it *here*, so a column missing from here is a column
+//! nobody was asked to bound. A reader sizing FR-202's wire types against the
+//! old list would have capped three strings and left eleven open, and the
+//! `SQLITE_TRANSIENT` argument made below for `content` holds identically for
+//! a 20 MB `copyright_text`. `song_arrangements.name` is the sharpest of the
+//! ones that were missing: it arrives as operator text through the public door
+//! [`insert_arrangement`], and on that door's empty-items path it is the only
+//! column written at all. A list of columns grows only with a migration; a
+//! list of axes grows whenever someone notices one.
+//!
+//! The columns are not all the same risk, and the counts are a different risk
+//! again — read as one sentence they point the reader at the cheapest of them,
+//! so the ones that differ in kind are separated below.
 //!
 //! *How many sections* is a linear cost on the way in. The insert loop below
 //! reuses a single prepared statement, so N sections are N bindings, N WAL
@@ -142,13 +179,17 @@
 //! loop was the only consumer of the axis; ADR-0049 records the correction
 //! rather than hiding it.
 //!
-//! *How long `content` is* is the dangerous axis on the way in. `params!` binds
-//! a `&String` as text with `SQLITE_TRANSIENT`, so **SQLite copies the
-//! buffer**: the peak is roughly twice the size of `content`, on top of the WAL
-//! frames held until the commit.
+//! *How long a text column is* is the dangerous size on the way in. `params!`
+//! binds a `&String` as text with `SQLITE_TRANSIENT`, so **SQLite copies the
+//! buffer**: the peak is roughly twice the size of the value, on top of the WAL
+//! frames held until the commit. `content` is named throughout this file
+//! because it is where a long paste usually lands, not because it is the only
+//! column that behaves this way — a 20 MB `copyright_text` or a 20 MB
+//! `song_arrangements.name` costs exactly the same, and every column listed
+//! above is bound by the same macro.
 //!
-//! *How many items an arrangement plays* is the dangerous axis on the way
-//! **out**, and no ceiling on the other four catches it.
+//! *How many items an arrangement plays* is the dangerous size on the way
+//! **out**, and no ceiling on any single column catches it.
 //! [`expand_arrangement`] materialises one copy of a section's `content` for
 //! every item that names it, so a single 2 MB section played by 10 000 items
 //! expands to **20 GB** out of stored rows totalling about 2 MB — an `.aero`
@@ -169,16 +210,27 @@
 //! cancel a write, so the trigger is written down instead of left as an
 //! intention, and it is written over **tables** rather than over a function
 //! name: the first commit that registers a `#[tauri::command]` writing to
-//! `songs`, `song_sections` or `arrangement_items` **through any door** owes
-//! the limit (ADR-0049).
+//! `songs`, `song_sections`, `song_arrangements` or `arrangement_items`
+//! **through any door** owes the limit (ADR-0049).
 //!
-//! Over a function name it had already been evaded. The earlier wording named
-//! [`insert_song`], and [`insert_song_with_default_arrangement`] does not call
-//! it — it calls `refuse_uninsertable` and `write_song` directly — so a command
-//! reaching only the newer door would meet the letter of that trigger and miss
-//! its point. That is ADR-0045's own shape, a second entry path, turned back on
-//! this obligation. Tables do not grow without a migration; function names grow
-//! whenever a path is convenient.
+//! **All four tables, because three was already evadable.** The wording before
+//! this one named `songs`, `song_sections` and `arrangement_items`, and this
+//! module writes four tables. A command registering [`insert_arrangement`] for
+//! a **named arrangement with no items** runs one statement — `INSERT INTO
+//! song_arrangements` — and its item loop runs zero times, so it writes none
+//! of the three tables that wording named while carrying an unbounded `name`
+//! to disk. The empty arrangement is not hypothetical: this module blesses it
+//! at [`insert_song_with_default_arrangement`], for the reasons stated there.
+//!
+//! Over a function name it had been evaded once before. The earliest wording
+//! named [`insert_song`], and [`insert_song_with_default_arrangement`] does not
+//! call it — it calls `refuse_uninsertable` and `write_song` directly — so a
+//! command reaching only the newer door would meet the letter of that trigger
+//! and miss its point. Both evasions are ADR-0045's own shape, a second entry
+//! path, turned back on this obligation — the second of them on the wording
+//! written to close the first. Tables do not grow without a migration; function
+//! names grow whenever a path is convenient, and a list of *some* tables is a
+//! function name wearing a table's clothes.
 //!
 //! **The read door owes a bound of its own, and no limit on writing implies
 //! it.** The first commit that registers a `#[tauri::command]` reaching
@@ -931,33 +983,66 @@ fn load_arrangement_items(
 /// the function or it cannot be compared with anything, so it enters as this
 /// argument and `WHERE a.id = ?1 AND a.song_id = ?2` is where it is spent.
 ///
-/// `Ok(None)` means **this song has no arrangement with that id**: either no
-/// arrangement anywhere has it, or one does and belongs to another song. The
-/// two are deliberately one answer — both mean the pair the caller holds is not
-/// a pair, and both are recovered from the same way, by falling back to
-/// [`Song::default_arrangement_id`]. `Ok(Some(vec![]))` is the different one,
-/// and that difference is the only positive claim made here: an arrangement of
-/// *this* song exists and plays nothing, which is what a song with no sections
-/// gets from [`insert_song_with_default_arrangement`]. Collapsing the two would
-/// answer a pair that does not exist with an arrangement that is merely empty.
+/// `Ok(None)` means **this song has no arrangement with that id**, and three
+/// states produce it, not two: no arrangement anywhere carries that id; one
+/// does and belongs to another song; or `song_id` names nothing at all, because
+/// that song never existed or was hard-deleted — `song_arrangements.song_id`
+/// references `songs(id)` `ON DELETE CASCADE`, so its arrangements went with
+/// it. The three are deliberately one answer, since each means the pair the
+/// caller holds is not a pair.
 ///
-/// **A claim of that kind cannot be held by two statements, so it is held by
-/// one.** The shape this replaced — read `song_arrangements` to learn whether
-/// the arrangement exists, then read `arrangement_items` for its items — had no
-/// snapshot binding the two. Under WAL with a second connection open (the
-/// configuration `super` describes at length), a `DELETE FROM
-/// song_arrangements` landing between the two statements leaves the first
-/// saying yes and the second returning no rows, which that shape reported as
-/// `Ok(Some(vec![]))` — an arrangement that no longer exists, answered with the
-/// value this paragraph reserves for one that exists and is empty. **The
-/// sequence is three statements long and needs no thread**: read the owner,
-/// delete from a second connection, count the items; that is the test this
-/// claim is owed. The `LEFT JOIN` below is rooted at `song_arrangements` so
-/// that the claim cannot be broken that way at all — a single `SELECT` outside
-/// an explicit transaction runs in one implicit read transaction, so existence
-/// and contents come from one snapshot. [`load_arrangements`] keeps the
-/// two-statement shape and makes no claim of this kind; the difference between
-/// the two functions is deliberate in both directions.
+/// **The recovery differs between them, though, so prescribing one is not
+/// enough.** For the first two, falling back to
+/// [`Song::default_arrangement_id`] is right. For the third it has no source:
+/// [`load_song`] returns `None` for a song that is not there, so there is no
+/// default id to fall back *to*, and the caller's next honest move is to report
+/// the song gone rather than to expand anything. For a song that is merely
+/// **soft-deleted** the fallback succeeds instead, and lands the caller in
+/// decision 4 at the head of this module — the default arrangement of a
+/// tombstoned song expands like any other, and nothing in the result says so.
+/// Decision 4 names this paragraph and this one names it back, because they are
+/// one fact seen from its two ends.
+///
+/// `Ok(Some(vec![]))` is the answer none of the three gets: an arrangement of
+/// *this* song exists and plays nothing, which is what a song with no sections
+/// gets from [`insert_song_with_default_arrangement`]. Collapsing it into
+/// `None` would answer a pair that does not exist with an arrangement that is
+/// merely empty.
+///
+/// **A claim of that kind cannot be held by two statements outside one
+/// transaction, so it is held by one statement.** The shape this replaced —
+/// read `song_arrangements` to learn whether the arrangement exists, then read
+/// `arrangement_items` for its items — took a fresh snapshot for each. Under
+/// WAL with a second connection open (the configuration `super` describes at
+/// length), a `DELETE FROM song_arrangements` landing between the two leaves
+/// the first saying yes and the second returning no rows, which that shape
+/// reported as `Ok(Some(vec![]))` — an arrangement that no longer exists,
+/// answered with the value this doc reserves for one that exists and is empty.
+/// The `LEFT JOIN` below is rooted at `song_arrangements` instead, and a single
+/// `SELECT` outside an explicit transaction runs in one implicit read
+/// transaction, so existence and contents come from one snapshot.
+///
+/// **That is a rule, and it is written as a rule because no test in the suite
+/// holds it.** The window is only open while the `DELETE` lands *between* two
+/// statements, and from outside a one-statement function that instant is not
+/// reachable: there is no hook to suspend the call in the middle and this crate
+/// starts no threads. The test named for this paragraph,
+/// `an_arrangement_deleted_by_another_connection_is_none_not_empty`, writes the
+/// replaced shape's three statements out by hand — read the owner, delete from
+/// a second connection, count the items — and shows the pair that shape would
+/// have answered `Some([])` to. It is an **artefact of the old shape, not a
+/// guard on this one**: it calls this function only after the delete has
+/// committed, and there a two-statement implementation finds no arrangement in
+/// its own first statement, returns `None` as well, and leaves the test green.
+/// So the rule carries itself — any edit that splits this `SELECT` in two
+/// reopens a window nothing in the suite will report. An earlier wording here
+/// called that sequence "the test this claim is owed"; it measures a weaker
+/// thing than the sentence it was attached to, and saying so is cheaper than
+/// building a harness to make the sentence true.
+///
+/// [`load_arrangements`] keeps the two-statement shape and makes no claim of
+/// this kind; the difference between the two functions is deliberate in both
+/// directions.
 ///
 /// **Who owns the distinction, and what would end it.** A distinction no call
 /// site acts on is a case every reader must rule out for nothing, and this one
@@ -988,17 +1073,20 @@ fn load_arrangement_items(
 ///
 /// The price of materialising the repetitions is stated rather than left to be
 /// met: a section played N times is N copies of its `content` in the returned
-/// `Vec`. This is the only function in this module that materialises one stored
-/// row's text more than once, and it does not bound N. **The head of this
-/// module names that axis** — the count of an arrangement's items, the fifth of
-/// the five it lists. It was added because the four it listed before did not
-/// include the one this function amplifies, so a sentence forwarding the
-/// obligation there forwarded it to a list that could not receive it. Nothing
-/// about the size of the database bounds N either: 10 000 items naming one 2 MB
-/// section are about 2 MB stored and 20 GB expanded.
+/// `Vec`. Of this module's five read functions it is the one that materialises
+/// a single stored row's text more than once — [`load_song`], `load_sections`,
+/// [`load_arrangements`] and `load_arrangement_items` each return one value per
+/// row they read — and it does not bound N. **The head of this module names
+/// that count**, as one of the two counts it lists beside the columns. It was
+/// added there after this function had forwarded its obligation to a list that
+/// did not contain it, which is the same failure the head now avoids by stating
+/// its columns rather than choosing its axes. Nothing about the size of the
+/// database bounds N either: 10 000 items naming one 2 MB section are about
+/// 2 MB stored and 20 GB expanded.
 ///
-/// **Three things can be wrong with an arrangement's items. Two are refused
-/// here; the third is invisible to any query.**
+/// **Four things can be wrong with an arrangement's items. Two are refused
+/// here; the third is invisible to any query, and the fourth is dropped in
+/// silence.**
 ///
 /// *A section belonging to another song* is refused with
 /// [`DbError::SectionNotInSong`]. The join already fetches
@@ -1040,6 +1128,20 @@ fn load_arrangement_items(
 /// pointing into song B read back as 0, 1, 3 after `DELETE FROM songs`, with no
 /// row left behind and no error raised. Whoever hard-deletes a song (FR-202)
 /// inherits that.
+///
+/// *An item row whose `section_id` is itself NULL* is the fourth, and it is
+/// the one this function handles worst: it takes the arm written for the
+/// all-NULL row an outer join produces for an arrangement with no items, and is
+/// skipped without a word. Through SQLite it cannot occur — the column is `NOT
+/// NULL` — but that is precisely the sentence the paragraph above refuses to
+/// rest on for a dangling id, so it is not rested on here either: under the
+/// same foreign-database model, an arrangement of one such item reads back as
+/// `Ok(Some(vec![]))`, the answer reserved for an arrangement that exists and
+/// plays nothing. Refusing it needs a discriminator this `SELECT` does not
+/// fetch and an error variant that can name no id; the comment at that arm
+/// says which, and both belong with the item that repairs such rows (FR-703).
+/// Named here rather than left for the next reader to notice, because the
+/// asymmetry is the one this function charges the inner join with.
 pub fn expand_arrangement(
     conn: &Connection,
     song_id: &str,
@@ -1078,15 +1180,33 @@ pub fn expand_arrangement(
         // arrangement: zero rows means no arrangement of this song has this id.
         arrangement_exists = true;
         let Some(item_section_id) = item_section_id else {
-            // The one all-NULL row an outer join produces for an arrangement
-            // with no items. `arrangement_items.section_id` is `NOT NULL`, so
-            // that is the only way this column arrives empty.
+            // The all-NULL row an outer join produces for an arrangement with
+            // no items. Through SQLite that is the only way this column arrives
+            // empty, `arrangement_items.section_id` being `NOT NULL` — but the
+            // dangling-id paragraph above believes in rows SQLite did not
+            // write, and under that same model a real item row with a NULL
+            // `section_id` is dropped here without a word. A one-item
+            // arrangement of that shape then reads as `Ok(Some(vec![]))`, the
+            // value the doc reserves for "exists and plays nothing": the
+            // aliasing that doc refuses for a deleted arrangement, tolerated
+            // here. Telling the two apart needs a discriminator this `SELECT`
+            // does not fetch (`i.arrangement_id`, which any joined item row has
+            // non-NULL because `NULL = a.id` never matches) and an error that
+            // can name no id, since there is none. Both belong with the item
+            // that repairs such rows (FR-703); written down so the gap is known
+            // rather than discovered.
             continue;
         };
-        // Every `song_sections` column selected above is `NOT NULL`, so a
-        // `None` among them means the outer join found no section row: the id
-        // dangles. Taken as one pattern rather than column by column, because
-        // one missing section row is the only thing any of them can mean.
+        // Every `song_sections` column selected above is `NOT NULL`, so from a
+        // database SQLite wrote, a `None` among them means the outer join found
+        // no section row: the id dangles. Taken as one pattern rather than
+        // column by column, because that is what any of them means on that
+        // path. Under the foreign-database model the paragraph above uses, a
+        // section row that does exist with a NULL `label` or `content` lands
+        // here too, and the error then names an id that is really there and
+        // calls it "belongs elsewhere or nowhere" — a wrong diagnosis with the
+        // right refusal, since nothing is projected either way. Column-by-
+        // column arms would buy precision only about rows SQLite cannot write.
         let (Some(id), Some(label), Some(section_type), Some(content), Some(owning_song)) =
             (id, label, section_type, content, owning_song)
         else {
