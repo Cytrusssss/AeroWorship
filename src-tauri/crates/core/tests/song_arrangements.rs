@@ -29,22 +29,49 @@
 //! the read path's defences against a foreign or hand-edited database are
 //! reachable at all.
 //!
-//! ── One measured fact that shapes the ordering tests ────────────────────
+//! ── One dated measurement that shapes the ordering tests ────────────────
 //!
-//! **Dropping `ORDER BY i.position` from `expand_arrangement` changes nothing
-//! observable.** `arrangement_items`' primary key is
-//! `(arrangement_id, position)`, so SQLite serves the scan from
-//! `sqlite_autoindex_arrangement_items_1` and the rows arrive in `position`
-//! order whether or not the clause is written. Measured, not assumed: items
-//! inserted in the order 2, 0, 4, 1, 3 come back 0, 1, 2, 3, 4 with the clause
-//! deleted.
+//! **Dropping `ORDER BY i.position` from `expand_arrangement` changed nothing
+//! observable when this was measured.** `arrangement_items`' primary key is
+//! `(arrangement_id, position)`, so SQLite served the join from
+//! `sqlite_autoindex_arrangement_items_1` and the rows arrived in `position`
+//! order whether or not the clause was written.
 //!
-//! The consequence for anyone adding a test here: **an ordering test built by
-//! inserting items in ascending order proves nothing** — it is green under
-//! every mutant, including the one with no ordering at all. What the fixtures
-//! below do discriminate is the *direction* and the *key*: `ORDER BY
-//! i.position DESC` and `ORDER BY s.sort_order` both change the answer, and
-//! that is what
+//! **That is a measurement with a date on it, not a property of the schema**,
+//! and it is worded that way because nothing in any gate here would report it
+//! becoming false. Measured 2026-08-27, on SQLite 3.53.2, against
+//! `expand_arrangement`'s query *as it now stands* — one statement rooted at
+//! `song_arrangements`, `LEFT JOIN` to `arrangement_items`, `LEFT JOIN` to
+//! `song_sections`. (The sentence predates that shape; it was re-measured
+//! against it rather than carried over.) Two readings, on a connection opened
+//! the way every test below opens one:
+//!
+//! * items inserted in the order 2, 0, 4, 1, 3 came back 0, 1, 2, 3, 4 from
+//!   that query with the clause deleted;
+//! * `EXPLAIN QUERY PLAN` gave the same three steps with the clause and
+//!   without it — `SEARCH a USING INDEX sqlite_autoindex_song_arrangements_1`,
+//!   `SEARCH i USING INDEX sqlite_autoindex_arrangement_items_1
+//!   (arrangement_id=?)`, `SEARCH s USING INDEX
+//!   sqlite_autoindex_song_sections_1` — and **no `USE TEMP B-TREE FOR ORDER
+//!   BY` step**, which is the planner saying the index supplies the order and
+//!   the clause sorts nothing.
+//!
+//! **What would end it**: an index added on `arrangement_items` that SQLite
+//! prefers for `i`, another `WHERE` term or join in that query, a different
+//! root table, or a newer bundled SQLite whose planner chooses otherwise. The
+//! symptom is that `USE TEMP B-TREE FOR ORDER BY` step appearing — from then on
+//! the clause is load-bearing and an ascending-insert fixture starts to mean
+//! something. **Nothing here is at risk but the sentence**: `ORDER BY
+//! i.position` is present and correct in the production query, so the answer is
+//! the same whichever way the planner goes.
+//!
+//! The consequence for anyone adding a test here holds whether or not the
+//! paragraph above has gone stale, because it is the weaker claim: **an
+//! ordering test built by inserting items in ascending order proves nothing**
+//! — deleting the clause outright reddened no test in this crate when that was
+//! last run. What the fixtures below do discriminate is the *direction* and the
+//! *key*: `ORDER BY i.position DESC` and `ORDER BY s.sort_order` both change
+//! the answer, and that is what
 //! [`expanding_an_arrangement_materialises_every_repetition_in_position_order`]
 //! is built to catch.
 //!
@@ -367,10 +394,11 @@ fn an_unknown_arrangement_id_expands_to_none() {
 ///
 /// **This fixture is chosen to discriminate the ordering key and direction,
 /// which an ascending fixture cannot.** Removing `ORDER BY i.position`
-/// altogether changes nothing — the rows already arrive in that order from the
-/// `(arrangement_id, position)` primary-key index (measured; see the head of
-/// this file), so no test can catch that edit and none here claims to. What
-/// this one does catch:
+/// altogether changed nothing when it was last measured — the rows already
+/// arrive in that order from the `(arrangement_id, position)` primary-key
+/// index (a dated measurement, with what would end it: see the head of this
+/// file) — so no test here catches that edit and none claims to. What this one
+/// does catch:
 ///
 /// * `ORDER BY i.position DESC` — the sequence reverses to
 ///   Chorus, Chorus, Verse 2, Chorus, Verse 1.
@@ -1173,28 +1201,61 @@ fn a_dangling_section_id_is_refused_by_name_while_the_repair_read_still_returns_
     }
 }
 
-/// An arrangement deleted by **another connection** is `None`, not an
-/// arrangement that merely plays nothing.
+/// Deleting an arrangement takes its items with it, and what is left expands
+/// to `None` while a *live* arrangement that plays nothing still expands to
+/// `Some([])`.
 ///
-/// This is the three-statement sequence `expand_arrangement`'s doc names as the
-/// test its single-statement shape is owed — *read the owner, delete from a
-/// second connection, count the items* — written out so that the claim is not a
-/// sentence with no artefact behind it. The shape this replaced read
-/// `song_arrangements` to learn that the arrangement exists and then
-/// `arrangement_items` for its contents, with no snapshot binding the two: the
-/// first statement below is that first read, it says yes, and after the delete
-/// the second returns no rows. That pair is `Ok(Some(vec![]))` — an arrangement
-/// that no longer exists, reported with the value reserved for one that exists
-/// and is empty.
+/// **What this test does not measure, said first because its name once implied
+/// otherwise.** It does **not** hold `expand_arrangement`'s single-statement
+/// rule — that existence and contents come from one snapshot. The `DELETE`
+/// below commits *before* `expand_arrangement` is called, fifteen lines later,
+/// so the row is already gone when the function runs: the two-statement shape
+/// that rule forbids finds no arrangement in its own first statement, answers
+/// `None` as well, and leaves this test green. It is an **artefact of the
+/// replaced shape** — the interleaving that shape got wrong, written out by
+/// hand — not a guard on the present one, and `expand_arrangement`'s doc says
+/// the same from the other side. The three statements below are that shape:
+/// read the owner (it says yes), delete from a second connection, read the
+/// items (no rows) — the pair the old shape reported as `Ok(Some(vec![]))`.
+/// **The name stays as it is**: it describes what the body observes, and
+/// `expand_arrangement`'s doc cites this function by name, which a rename would
+/// quietly falsify.
 ///
-/// No thread is needed, and that is the point of writing the interleaving out
-/// in this order rather than racing for it: the window the old shape left open
-/// is reproduced deterministically, and one `SELECT` closes it by answering both
-/// questions from one implicit read transaction.
+/// **Why no test in this suite holds that rule.** The window is only
+/// distinguishable while the `DELETE` lands *between* two statements, and from
+/// outside a one-statement function that instant is unreachable without a hook
+/// into the call: `rusqlite`'s `progress_handler` is the tool, and it sits
+/// behind that crate's off-by-default `hooks` feature, which this crate's
+/// manifest does not enable and would have to — a production dependency
+/// widened for a harness. What the harness would then assert is the *number of
+/// statements* the function issues, an implementation shape rather than
+/// anything FR-204 promises, from a callback that counts VM steps and so knows
+/// nothing of statement boundaries. That price is not worth paying; the rule is
+/// carried as a rule, in prose, where the function states it.
 ///
-/// **The empty arrangement asserted at the end is the control.** Without it the
-/// test is also green under an implementation that answers `None` to
-/// everything, which would destroy the distinction the first assertion defends.
+/// **What it does measure, each with the mutation that reddens it and nothing
+/// else in this crate — both mutants run against the whole crate on
+/// 2026-08-27, one failing test each:**
+///
+/// * *Deleting a `song_arrangements` row takes its `arrangement_items` with
+///   it.* Drop `ON DELETE CASCADE` from `arrangement_items.arrangement_id` in
+///   Appendix A and this test alone fails, on the `DELETE` itself.
+///   [`hard_deleting_a_song_silently_removes_it_from_another_songs_arrangement`]
+///   survives that edit: there the items are already gone by the *section*
+///   cascade before the arrangement row is reached, so this is the only place
+///   the item-to-arrangement link is exercised on its own.
+/// * *An arrangement of a song that **has** sections but plays nothing is
+///   `Some([])`* — not the song itself. Make an empty arrangement fall back to
+///   the whole song and this test alone fails.
+///   [`a_song_with_no_sections_still_gets_an_empty_default_arrangement`] cannot
+///   catch that one: its song has no sections to fall back to, so both
+///   implementations answer `Some([])` there. That is why the control here is
+///   written on a song with two.
+/// * *An arrangement whose row is gone expands to `Ok(None)`* — which, the
+///   `DELETE` having committed, is the same question
+///   [`an_unknown_arrangement_id_expands_to_none`] asks. Kept because it is the
+///   sentence the reader of the sequence above expects to see ended, not
+///   because it discriminates anything that test does not.
 #[test]
 fn an_arrangement_deleted_by_another_connection_is_none_not_empty() {
     let db = TempDb::new("expand-deleted-underfoot");
@@ -1252,16 +1313,19 @@ fn an_arrangement_deleted_by_another_connection_is_none_not_empty() {
         expand_arrangement(&conn, "song-w", "arr-w")
             .expect("an arrangement that is gone is an absence, not an error"),
         None,
-        "existence and contents come from one snapshot, so a deleted arrangement is \
-         None — never Some([]), which means an arrangement that exists and plays nothing",
+        "an arrangement whose row is gone is an absence — never Some([]), which is \
+         reserved for one that exists and plays nothing. The delete has already \
+         committed here, so this says nothing about the one-snapshot rule; see the doc",
     );
 
     assert_eq!(
         expand_arrangement(&conn, "song-w", "arr-w-empty")
             .expect("the surviving arrangement must still read"),
         Some(Vec::new()),
-        "the control: an arrangement of this song that plays nothing is still Some([]), \
-         so the assertion above is about the delete and not about collapsing both answers",
+        "an arrangement of this song that plays nothing is still Some([]) — the song has \
+         two sections and gets none of them back, so this is not merely the control on \
+         the assertion above but the one place an empty arrangement is asked of a song \
+         that has something to play",
     );
 }
 
