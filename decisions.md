@@ -1701,3 +1701,39 @@ Dan pemicu itu tidak menyebut satu pun **pintu baca**, padahal `expand_arrangeme
 **(3) FR-204 bukan pemilik lubang DELETE, dan baris pertama tabel di atas sudah diperbaiki.** Ketika ADR ini ditulis saya menyimpulkan FR-204 akan membuka jalur hapus arrangement. Teks requirement PRD baris 337 tidak menyebut penghapusan sama sekali — ia berbunyi *"an ordered sequence of references to that song's sections. A default arrangement is generated on creation"*. Yang FR-204 benar-benar pikul adalah arah **tulis** `default_arrangement_id`, dan arah itu justru satu-satunya yang **sudah** dijaga kedua trigger. Pemiliknya berpindah ke item pertama yang benar-benar menghapus baris `song_arrangements`. **Dua tempat lain masih menyalin atribusi lama** dan wajib ikut diperbaiki sebelum FR-204 ditutup, sebab menutupnya akan membuat keduanya menunjuk item yang sudah selesai: `001_initial_schema.sql:132-135` dan paragraf di bawah tabel ini.
 
 **Yang membatalkan keputusan ini.** Migrasi yang benar-benar menambahkan FK yang hilang. Saat itu baris pertama tabel di atas berpindah dari "dijaga kode aplikasi" ke "dijaga skema", dan cek Rust yang bersangkutan menjadi sabuk pengaman alih-alih satu-satunya penjaga — tetapi hanya baris itu, dan hanya bila migrasinya juga membersihkan baris gantung yang sudah terlanjur ada.
+
+---
+
+### ADR-0050 — Gate clippy repo ini buta terhadap seluruh berkas test crate `core` sepanjang proyek, dan sebabnya satu flag yang hilang; perintah gate wajib memilih workspace, bukan package root
+
+| | |
+| --- | --- |
+| Tanggal | 2026-08-27 |
+| Status | Diterima |
+| Terkait | SETUP-03, FR-204, GATE-G10, NFR-32, [ADR-0020](decisions.md#adr-0020) · [ADR-0048](decisions.md#adr-0048) |
+
+**Cacatnya, dan bagaimana ia ditemukan.** Ronde penutupan audit FR-204 mengubah tanda tangan `expand_arrangement`, yang memerahkan enam call site di `crates/core/tests/song_arrangements.rs`. Implementer melaporkan sesuatu yang seharusnya mustahil: `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` **exit 0**, sementara berkas test itu **tidak mengompilasi sama sekali**.
+
+Diverifikasi coordinator, dua bentuk berdampingan pada pohon yang sama:
+
+* `--manifest-path src-tauri/Cargo.toml --all-targets` → **exit 0**.
+* `--manifest-path src-tauri/Cargo.toml --workspace --all-targets` → **`error[E0061]` × 6**.
+
+**Sebabnya bukan bug cargo, melainkan arti `--all-targets` yang lebih sempit daripada bunyinya.** Ia memilih semua *target* dari *package yang terpilih*. Tanpa `--workspace`, yang terpilih hanyalah package root `aeroworship`; `aeroworship-core` masuk sebagai **dependency**, dan sebuah dependency dibangun sebagai **lib saja**. Target testnya tidak pernah termasuk. Jadi bendera yang namanya berbunyi "semua target" memang memberi semua target — dari separuh workspace.
+
+**Mengapa ini ADR dan bukan koreksi satu baris.** Repo ini bertumpu pada dua janji yang saling menopang: suite hijau tidak membuktikan apa pun sampai mutasi dijalankan ([ADR-0048](decisions.md#adr-0048)), dan gate hijau berarti pohon bersih ([ADR-0020](decisions.md#adr-0020)). Temuan ini menyerang yang kedua di tempat yang paling tidak terduga: **satu-satunya crate tempat hampir seluruh test repo ini hidup**. Sepanjang FR-205, FR-401, FR-310, FR-203 dan FR-204 — lebih dari dua ratus test Rust — clippy tidak pernah sekali pun melihat berkas yang memuatnya. Setiap "clippy bersih" yang tercatat di `PROGRESS.md` adalah pernyataan tentang `src/` dan `crates/core/src/`, bukan tentang `crates/core/tests/`.
+
+**Yang tidak ikut runtuh, dinyatakan supaya kerusakannya tidak dibaca lebih luas.** `cargo test --workspace` **memang** membangun dan menjalankan target test itu — ia memakai `--workspace` sejak awal. Karena itu kesalahan yang **menggagalkan kompilasi atau menggagalkan test** selalu tertangkap, dan tidak ada angka test yang pernah tercatat di berkas ini palsu. Yang lolos adalah kelas yang lebih sempit dan lebih sunyi: **lint** atas berkas test — `clippy::*` yang tak pernah dijalankan, dan `-D warnings` yang tak pernah ditegakkan di sana. Bahwa sebelas suite melewatinya tanpa satu peringatan pun bukan bukti kebersihan; ia belum diukur.
+
+**Bentuk kegagalannya asimetris, sama seperti [ADR-0048](decisions.md#adr-0048), dan kali ini kami beruntung dua kali.** Ia tertangkap hanya karena `cargo test` di gate yang **sama** memerah pada berkas yang sama, sehingga ada dua laporan yang bertentangan dan salah satunya harus dijelaskan. Seandainya perubahan itu hanya melanggar lint dan bukan kompilasi, kedua gate akan hijau serentak dan tidak ada yang meminta penjelasan.
+
+**Keputusan.**
+
+1. **Bentuk kanonik gate clippy repo ini adalah `cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets -- -D warnings`.** `--workspace` **dan** `--all-targets`, bukan salah satu: yang pertama memilih package, yang kedua memilih target di dalamnya, dan menghilangkan mana pun mengembalikan sebagian titik buta.
+2. **Setiap brief agent memakai bentuk itu**, dan brief lama tidak diperbaiki secara retroaktif — yang diperbaiki adalah ukurannya, sekali, di ronde berikutnya yang menyentuh `crates/core/tests/`.
+
+**Cacat yang lebih dalam, dinyatakan karena ia yang membuat cacat di atas mungkin: nol perintah gate repo ini punya rumah yang dapat dieksekusi.** Keenam gate hidup sebagai **prosa** — di brief coordinator dan di baris changelog `PROGRESS.md`. Nol script npm, nol berkas CI, nol justfile memuat satu pun perintah `cargo`. `package.json` punya `lint`, `typecheck` dan `test` untuk sisi JS; sisi Rust tidak punya padanan. Perintah yang hanya hidup sebagai kalimat **tidak dapat salah dengan cara yang terlihat**: ia disalin ulang tiap ronde, dan salinan yang salah tetap terbaca benar. Itulah cara satu flag hilang selama lima item berturut-turut tanpa satu orang pun menyadarinya.
+
+Memberi keenamnya rumah yang dapat dieksekusi adalah pekerjaan SETUP-03, dan SETUP-03 sudah `done` — jadi ia tidak diselundupkan ke dalam FR-204. **Pemicunya dituliskan alih-alih dibiarkan sebagai niat: item pertama yang menambahkan berkas CI, atau item rilis pertama, mana yang lebih dulu.** Sampai saat itu, bentuk kanonik di atas adalah satu-satunya yang boleh dikutip.
+
+**Yang membatalkan keputusan ini.** Cargo mengubah `--all-targets` agar mencakup target test seluruh workspace secara baku, atau keenam gate mendapat rumah yang dapat dieksekusi — pada titik itu perintahnya berhenti menjadi kalimat yang disalin dan menjadi berkas yang di-review, dan ADR ini menjadi catatan sejarah alih-alih aturan.
