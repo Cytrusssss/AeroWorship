@@ -37,25 +37,41 @@ Commit the resulting `package-lock.json` with the change.
 
 ## Verification commands
 
-These six are the gate. All of them must exit 0.
+These seven are the gate. All of them must exit 0.
 
 | Layer | Command |
 | --- | --- |
-| Rust test | `cargo test --workspace --manifest-path src-tauri/Cargo.toml` |
-| Rust lint | `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` |
-| Rust format | `cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check` |
-| Frontend test | `npm run test` |
+| Rust format | `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check` |
+| Rust lint | `cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets -- -D warnings` |
+| Rust test | `cargo test --manifest-path src-tauri/Cargo.toml --workspace` |
 | Frontend lint | `npm run lint` |
+| Frontend test | `npm run test` |
 | Typecheck | `npm run typecheck` |
+| Installer | `npm run tauri build` |
 
-The `--all` on `cargo fmt` and the `--workspace` on `cargo test` are load-bearing;
-do not "tidy" them away for symmetry with `clippy` (ADR-0020). `--manifest-path`
-selects the `aeroworship` package, not the workspace, so without those flags
-`aeroworship-core` — where the correctness-critical logic of PRD §6.1 and the
-targets of NFR-32 / GATE-G10 live — is skipped in silence and the command still
-exits 0, which is worse than a red build. `cargo clippy` needs no such flag: it
-reaches every workspace member through `RUSTC_WORKSPACE_WRAPPER` as it builds
-them. The asymmetry is the correct state, not an oversight.
+Seven, not six. `npm run tauri build` has been part of the gate since ADR-0041
+and was missing from this table, which is the failure ADR-0050 describes rather
+than an exception to it: no gate command in this repository has an executable
+home, so the list lives as a sentence in more than one place and the copies can
+disagree without a symptom. It earns its row — a malformed permission or
+capability file fails in `tauri_build::build()` and in nothing else, so the
+first six can all be green over a tree that cannot produce an installer.
+
+Every flag above is load-bearing and none may be "tidied" away for symmetry
+(ADR-0020, ADR-0050). `--manifest-path` names the `aeroworship` **package**, not
+the workspace, so `cargo fmt` and `cargo test` without `--all` / `--workspace`
+skip `aeroworship-core` — where the correctness-critical logic of PRD §6.1 and
+the targets of NFR-32 / GATE-G10 live — in silence, and still exit 0, which is
+worse than a red build.
+
+`cargo clippy` needs **both** `--workspace` and `--all-targets`, and for a
+reason that is easy to get backwards: `--all-targets` selects every target of
+every **selected package**, and without `--workspace` the only selected package
+is `aeroworship`. `aeroworship-core` then enters as a dependency, a dependency
+is built as a lib only, and its test targets are never linted at all. That was
+true for eleven consecutive items before it was measured (ADR-0050): on the same
+tree, `--all-targets` alone exited 0 while `--workspace --all-targets` reported
+six `error[E0061]`.
 
 `npm run lint` runs ESLint and then, through the `postlint` lifecycle,
 `prettier --check`. `npm run format` rewrites the files Prettier owns.

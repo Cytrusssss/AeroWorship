@@ -60,11 +60,38 @@ const CONTROL_WINDOW_LABEL: &str = "main";
 /// Label of the Projector Output window.
 ///
 /// It is not `"main"`, so `capabilities/main-window.json` — which reads
-/// `"windows": ["main"]` — grants this window nothing. That is the intent for
-/// plugin commands; it does **not** hold for the app's own commands, which have
-/// no per-window scoping at all in `tauri` 2.11.5 (ADR-0039, and the note in
-/// `crate::commands`). The output window can invoke every command in
-/// `commands.inventory.md` from the moment it exists, which is now.
+/// `"windows": ["main"]` — grants this window nothing, and since SEC-01 that
+/// holds for this application's own commands too, not only for `plugin:` ones.
+/// `src-tauri/permissions/` exists, so the app ships an ACL manifest and
+/// `webview/mod.rs:1823` gates app-defined commands exactly like plugin ones; a
+/// window no capability names gets `"Command {} not allowed by ACL"`.
+/// `capabilities/output-window.json` names this label and grants it nothing, in
+/// writing, so the emptiness is a statement rather than an omission.
+///
+/// Until SEC-01 the opposite was true and this doc comment said so: app-defined
+/// commands had no per-window scoping at all, and this window could invoke every
+/// entry in `commands.inventory.md` from the moment it existed (ADR-0041). That
+/// is closed. `src-tauri/tests/acl_window_scoping.rs` is the proof, not this
+/// sentence.
+///
+/// At least three things it still does not cover, all owned elsewhere and all
+/// named here so this label is not read as a stronger boundary than it is. The
+/// count is open on purpose: a closed enumeration has been wrong three times in
+/// this repository already, and each time the item that was missing was the one
+/// nobody had looked for yet.
+///
+/// 1. `plugin:__TAURI_CHANNEL__|fetch` is exempt from that gate inside tauri's
+///    own condition, so no capability decides it.
+/// 2. `output.html` shares an origin with `index.html`, so script here reaches
+///    the Control Panel document without an `invoke` and without the ACL at all
+///    (ADR-0018, ADR-0042).
+/// 3. `pending.navigation_handler` is `None` for this window, so it can be
+///    navigated to any remote URL, and CSP does not govern top-level
+///    navigation. What arrives afterwards is same-origin with nothing — but it
+///    is also not this bundle, and the ACL says nothing about how the document
+///    in a window got there. That is SEC-02's, not this item's.
+///
+/// The first two are written up in `crate::commands`.
 pub const OUTPUT_WINDOW_LABEL: &str = "output";
 
 /// The output bundle's entry point, resolved against `frontendDist` in release
@@ -117,12 +144,18 @@ pub fn connected_monitors<R: Runtime>(app: &AppHandle<R>) -> Vec<Monitor> {
 
     // This function reads the OS and does nothing else. The matching itself is
     // `flag_primary`, in `aeroworship_core`, because nothing that needs an
-    // `AppHandle` can be put in front of two displays by a test: Tauri 2.11.5's
-    // mock runtime hardcodes `available_monitors()` to an empty `Vec`
-    // (`test/mock_runtime.rs:797`) and `tauri::Monitor`'s fields are
-    // `pub(crate)`, so no test can hand-build one either. Everything below that
-    // could be wrong in a way a single-display development machine would not
-    // show is on the other side of that call (PRD §6.1).
+    // `AppHandle` can be put in front of any displays by a test, let alone two.
+    // On tauri 2.11.5 the two calls below reach `MockRuntimeHandle` (or
+    // `MockRuntime`), and there both `primary_monitor` and `available_monitors`
+    // are `unimplemented!()` - `test/mock_runtime.rs:245`/`:253` and
+    // `:1276`/`:1284`. They panic; they do not return an empty list. (The one
+    // mock arm that does return `Ok(Vec::new())`, `:797`, is
+    // `WindowDispatch::available_monitors`, reached from a `Window`, which is
+    // not the receiver this function holds.) And `tauri::Monitor`'s fields are
+    // `pub(crate)` (`window/mod.rs:59-63`), so no test can hand-build one to
+    // feed in either way. Everything below that could be wrong in a way a
+    // single-display development machine would not show is on the other side of
+    // that call (PRD §6.1).
     let reported = app
         .available_monitors()
         .unwrap_or_default()

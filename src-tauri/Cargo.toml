@@ -4,6 +4,13 @@
 # also keeps `target/` where `.gitignore` already expects it.
 [workspace]
 members = ["crates/core"]
+# Stated, not inferred. `edition = "2021"` already implies resolver 2, and the
+# reasoning in `[dev-dependencies]` below — that cargo unifies features across
+# dependency kinds for one package, so `default-features = false` has to appear
+# on BOTH `tauri` declarations — is written for resolver 2's rules. Spelling it
+# out means that argument no longer depends on a reader deriving the resolver
+# from the edition, and it does not silently change if the edition ever moves.
+resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
@@ -61,6 +68,20 @@ tauri = { version = "2", default-features = false, features = [
 # unvalidated argument the rules in `src/commands/mod.rs` forbid. If the shell
 # crate ever needs either, declare it in the change that needs it, with the
 # type it is for.
+
+[dev-dependencies]
+# Test-only, and `default-features = false` on purpose — the same "defaults
+# minus `dynamic-acl`" list the normal dependency above spells out (ADR-0013).
+# Cargo unifies features across dependency kinds for one package, so a plain
+# `tauri = { version = "2", features = ["test"] }` here would switch the app's
+# default feature set back on for every `cargo test` and every
+# `cargo clippy --all-targets` build — `dynamic-acl` included. The one feature
+# added is `test`, which brings `tauri::test::{mock_builder, get_ipc_response,
+# MockRuntime}`; it is what lets `tests/acl_window_scoping.rs` invoke a command
+# from a named window with no GUI, and therefore what turns "the `output`
+# window is granted nothing" from a claim read off the manifests into an
+# assertion (SEC-01).
+tauri = { version = "2", default-features = false, features = ["test"] }
 
 [profile.release]
 # Cross-marker for the `custom-protocol` guard in `src/lib.rs` (ADR-0018,
