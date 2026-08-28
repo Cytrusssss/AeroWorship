@@ -85,11 +85,14 @@ const CONTROL_WINDOW_LABEL: &str = "main";
 /// 2. `output.html` shares an origin with `index.html`, so script here reaches
 ///    the Control Panel document without an `invoke` and without the ACL at all
 ///    (ADR-0018, ADR-0042).
-/// 3. `pending.navigation_handler` is `None` for this window, so it can be
-///    navigated to any remote URL, and CSP does not govern top-level
-///    navigation. What arrives afterwards is same-origin with nothing — but it
-///    is also not this bundle, and the ACL says nothing about how the document
-///    in a window got there. That is SEC-02's, not this item's.
+/// 3. The ACL says nothing about how the document in a window *got there*. A
+///    remote page navigated into this window would be same-origin with nothing
+///    and granted nothing, but it would also not be this bundle. Since SEC-02
+///    that navigation is refused — by
+///    [`crate::services::navigation`], a plugin hook rather than anything on
+///    the builder below, because this window is only one of the two that needed
+///    covering. What the guard does *not* cover is stated in its own module
+///    docs; this list stops naming it as an open surface, not as a closed one.
 ///
 /// The first two are written up in `crate::commands`.
 pub const OUTPUT_WINDOW_LABEL: &str = "output";
@@ -252,6 +255,13 @@ fn open_output_window<R: Runtime>(app: &AppHandle<R>, target: &Monitor) -> tauri
         WebviewUrl::App(OUTPUT_ENTRY.into()),
     )
     .title(OUTPUT_TITLE)
+    // `use_https_scheme` is deliberately NOT called here, and that is load
+    // bearing outside this file: this window has no `tauri.conf.json` entry, so
+    // `services::navigation` cannot read its spelling and falls back to the
+    // documented `WebviewAttributes` default, `false` — i.e. it expects this
+    // window to be served from `http://tauri.localhost`. Turning it on here
+    // without teaching `app_origins` about this label makes the guard refuse
+    // this window's own pages (SEC-02).
     .background_color(OUTPUT_BACKGROUND)
     // "Borderless" (FR-102). The rest of the chrome FR-105 asks about — context
     // menu, text selection, dev-tools — is that item's, and is not touched here.

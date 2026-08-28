@@ -10,3 +10,4 @@
 //! Commands call services; services do not call commands.
 
 pub mod display;
+pub mod navigation;

@@ -65,6 +65,15 @@ pub mod services;
 /// configuration is a normal library function.
 pub fn run() {
     tauri::Builder::default()
+        // Registered before anything else because it is the only piece of this
+        // configuration that also governs the window this function never sees:
+        // `main` is created by tauri itself from `tauri.conf.json`, so a
+        // per-window `on_navigation` could never reach it. A plugin hook is
+        // consulted for every webview, so one line covers both windows and
+        // every window a later item adds (SEC-02, ADR-0042). Without it either
+        // window may be navigated to any remote URL, and CSP does not govern
+        // top-level navigation — see `services/navigation.rs`.
+        .plugin(services::navigation::guard())
         .setup(|app| {
             // The database is opened and brought up to date before anything can
             // query it; failing here aborts start-up rather than letting the app
