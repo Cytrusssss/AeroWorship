@@ -51,11 +51,27 @@ pertama sesederhana mungkin — file berikutnya akan menirunya.
 ## Menjalankan test
 
 ```
-cargo test  --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+cargo test  --workspace --manifest-path src-tauri/Cargo.toml
+cargo clippy            --manifest-path src-tauri/Cargo.toml -- -D warnings
+cargo fmt   --all       --manifest-path src-tauri/Cargo.toml -- --check
 npm run test
+npm run lint
 npm run typecheck
 ```
+
+`--workspace` / `--all` wajib, dan justru kamu yang paling dirugikan bila hilang
+— lihat [ADR-0020](../../decisions.md#adr-0020). Tanpa flag itu `--manifest-path`
+menamai **paket** `aeroworship` saja, sehingga `cargo test` melaporkan
+`0 passed; 0 failed` dan **exit 0** meski crate `aeroworship-core` penuh test
+yang gagal. Seluruh logika correctness-critical PRD §6.1 — parser referensi
+kitab, slide splitting, serialisasi `.aero` — hidup di crate itu, dan NFR-32 /
+GATE-G10 menuntut coverage ≥ 80% di sana. `cargo clippy` tidak perlu flag
+(ia melewatkan seluruh workspace member lewat `RUSTC_WORKSPACE_WRAPPER`);
+keseragaman bentuk ketiga perintah itulah yang dulu membuat cacatnya tak
+terlihat.
+
+Bila sebuah perintah melaporkan lulus, pastikan ia benar-benar menjalankan
+sesuatu. "Nol test dijalankan" bukan kelulusan.
 
 Jalankan perintah yang relevan dengan item. Bila sebuah perintah belum ada
 karena scaffolding belum lengkap, sebutkan itu — jangan anggap lulus.

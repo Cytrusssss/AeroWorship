@@ -582,7 +582,7 @@ Two distinct mechanisms, chosen deliberately:
 - **Commands** (`invoke`) — request/response, used for anything that reads or mutates persistent state: search, CRUD, import, save, load, monitor management. Always `async`, always returning a typed `Result`.
 - **Events** (`emit` / `listen`) — one-way broadcast, used for anything real-time or multi-consumer: slide changes, output state, import progress, monitor topology changes.
 
-The full catalogue with payload shapes is in [Appendix D](#appendix-d--tauri-command--event-reference). Types are defined once in Rust and generated into TypeScript at build time ([NFR-33](#57-maintainability--accessibility)), so the contract cannot drift.
+The full catalogue with payload shapes is in [Appendix D](#appendix-d--tauri-command--event-reference). Types are defined once in Rust and generated into TypeScript by a checked gate that fails if the committed contract does not match the Rust types ([NFR-33](#57-maintainability--accessibility)), so the contract cannot drift.
 
 **Event naming convention:** `domain:verb` — `slide:show`, `slide:preload`, `output:state`, `import:progress`, `monitor:changed`, `session:dirty`.
 
@@ -1095,6 +1095,24 @@ CREATE INDEX idx_arritems_section ON arrangement_items(section_id);
 -- Circular reference resolved after both tables exist.
 CREATE TRIGGER trg_songs_default_arrangement_fk
 BEFORE UPDATE OF default_arrangement_id ON songs
+WHEN NEW.default_arrangement_id IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM song_arrangements
+                     WHERE id = NEW.default_arrangement_id
+                       AND song_id = NEW.id)
+BEGIN
+    SELECT RAISE(ABORT, 'default_arrangement_id must belong to this song');
+END;
+
+-- The same guard on INSERT, because UPDATE alone leaves a song free to be born
+-- pointing at another song's arrangement. Its consequence is that an INSERT
+-- with a non-NULL default_arrangement_id is *always* rejected — intended, not a
+-- side effect: song_arrangements.song_id references songs(id), so an
+-- arrangement of a song that does not exist yet cannot exist either, and any
+-- non-NULL value at INSERT time therefore names some other song's row. The
+-- legal flow is three steps, and this trigger is what makes the schema enforce
+-- it: INSERT with NULL, create the arrangement, then UPDATE.
+CREATE TRIGGER trg_songs_default_arrangement_fk_insert
+BEFORE INSERT ON songs
 WHEN NEW.default_arrangement_id IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM song_arrangements
                      WHERE id = NEW.default_arrangement_id

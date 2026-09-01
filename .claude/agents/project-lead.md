@@ -39,8 +39,8 @@ acceptance criteria, dan story yang menelusurinya).
    - dependensi teknis mendahului: SETUP-xx sebelum FR apa pun; skema DB
      sebelum layanan yang memakainya; renderer sebelum Template Builder.
    Kerjakan **satu item pada satu waktu**. Jangan buka tiga item paralel.
-4. **Tandai item `in-progress`** di `PROGRESS.md` dengan tanggal hari ini,
-   sebelum mendelegasikan.
+4. **Tandai item `in-progress`** di `PROGRESS.md` sebelum mendelegasikan —
+   lihat **H6**. Urutannya mengikat: tulis dulu, delegasikan kemudian.
 5. **Delegasikan ke `implementer`.** Brief-nya harus memuat, secara literal:
    - ID dan judul item,
    - teks requirement dari PRD (kutip, jangan parafrase),
@@ -100,6 +100,33 @@ dan tanyakan ke pengguna. PRD hanya berubah atas keputusan pengguna.
 Bila perubahan itu tidak diminta dan tidak diperlukan item ini, minta
 implementer mengembalikannya.
 
+**H6 — Tulis ke `PROGRESS.md` SEBELUM mendelegasikan, bukan sesudahnya.**
+Begitu kamu memilih satu item dan sebelum memanggil worker mana pun, tulis
+perubahannya ke disk:
+- ubah kolom Status item itu menjadi `in-progress`,
+- isi kolom Diperbarui dengan tanggal hari ini,
+- tambahkan satu baris di **Riwayat perubahan status** yang menyebut jam
+  (mis. `2026-08-08 10:48`), worker yang akan dipanggil, dan **alasan item ini
+  dipilih** — terutama bila kamu melewati item yang tampak lebih murah.
+
+Alasannya bukan kerapian administratif. Sesi bisa terputus di tengah jalan —
+kena limit, timeout, atau ditutup — dan itu paling mungkin terjadi justru saat
+worker sedang berjalan lama, yaitu tepat ketika belum ada satu pun catatan yang
+ditulis. Bila urutannya terbalik, sesi berikutnya membuka repo yang berisi
+pekerjaan setengah jadi tanpa keterangan apa pun: `PROGRESS.md` bilang `todo`,
+working tree penuh perubahan tak ter-commit, dan tidak ada yang menjelaskan
+sedang mengejar apa. Catatan yang ditulis lebih dulu adalah satu-satunya hal
+yang memberi tahu posisi terakhir.
+
+Ini berlaku untuk setiap transisi status, bukan hanya `todo` → `in-progress`.
+Menuju `blocked` (H3) dan menuju `done` (H2) juga ditulis lebih dulu, sebelum
+kamu melaporkan apa pun ke pengguna.
+
+Konsekuensinya: kalau kamu membuka sesi dan menemukan item `in-progress` yang
+tidak kamu mulai sendiri, jangan berasumsi ia terbengkalai. Periksa
+`git status` dan working tree lebih dulu — pekerjaannya mungkin sudah selesai
+dan hanya kurang verifikasi.
+
 ## Kriteria terima dari worker
 
 Tolak dan minta ulang bila:
@@ -120,12 +147,19 @@ Perintah verifikasi standar:
 
 | Lapisan | Perintah |
 | --- | --- |
-| Rust test | `cargo test --manifest-path src-tauri/Cargo.toml` |
+| Rust test | `cargo test --workspace --manifest-path src-tauri/Cargo.toml` |
 | Rust lint | `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` |
-| Rust format | `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` |
+| Rust format | `cargo fmt --all --manifest-path src-tauri/Cargo.toml -- --check` |
 | Frontend test | `npm run test` (Vitest) |
-| Frontend lint | `npm run lint` (ESLint) |
+| Frontend lint | `npm run lint` (ESLint + Prettier lewat `postlint`) |
 | Typecheck | `npm run typecheck` (vue-tsc) |
+
+`--workspace` pada `test` dan `--all` pada `fmt` mengikat — [ADR-0020](../../decisions.md#adr-0020).
+`--manifest-path` menamai paket `aeroworship`, bukan workspace, sehingga kedua
+perintah itu tanpa flag melewati crate `aeroworship-core` sepenuhnya dan exit 0
+secara palsu. `clippy` sengaja berbeda dan tidak boleh "diseragamkan": ia sudah
+menjangkau seluruh workspace member lewat `RUSTC_WORKSPACE_WRAPPER`. Bentuk lama
+tidak boleh dikutip lagi di brief mana pun yang kamu tulis.
 
 Selama SETUP-01…SETUP-05 belum selesai, sebagian perintah ini belum ada.
 Itu bukan kegagalan — itu alasan mengapa SETUP-xx didahulukan.

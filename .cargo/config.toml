@@ -1,0 +1,39 @@
+# Cargo configuration for the whole repository.
+#
+# It sits at the repository root rather than next to `src-tauri/Cargo.toml`
+# because Cargo discovers this file by walking up from the **current working
+# directory**, never from `--manifest-path`. A copy under `src-tauri/.cargo/`
+# would be read by `cd src-tauri && cargo test` and silently ignored by
+# `cargo test --manifest-path src-tauri/Cargo.toml` run from the root — which is
+# the form every gate command in this project uses. Placed here, both
+# invocations find it, and `relative = true` resolves the value against this
+# file's parent directory, so the answer does not depend on where cargo was
+# started from either.
+
+[env]
+# Where `ts-rs` writes the generated TypeScript contract (NFR-33). This is the
+# directory PRD §6.13 names, `src/shared/bindings/`.
+#
+# Read this before assuming the generation happens at build time. It does not,
+# and it cannot: ts-rs 12.0.1 states it in its own documentation
+# (`ts_rs::TS`, "exporting") — "Because Rusts procedural macros are evaluated
+# before other compilation steps, TypeScript bindings __cannot__ be exported
+# during compile time." `#[ts(export)]` expands to a `#[test]`, so the bindings
+# are written by `cargo test`, not by `cargo build`. That is unchanged and
+# unchangeable. What changed is what the PRD asks for: §6.4 (line 585) no longer
+# promises build time, it promises types "generated into TypeScript by a checked
+# gate that fails if the committed contract does not match the Rust types". That
+# gate is `npm run bindings:check`, wired as `pretypecheck`; the decision is
+# recorded in ADR-0034.
+#
+# Consequence worth stating plainly: `cargo test --workspace` **writes** into
+# `src/shared/bindings/`. That is deliberate — it makes regeneration a
+# side-effect of the gate everyone already runs, so the committed bindings
+# cannot be stale for long — but it does mean a test run can leave the working
+# tree dirty. `npm run bindings:check` is what turns that from a surprise into
+# a failure: it re-exports into a temporary directory (by setting this variable
+# from the outside, which wins because Cargo does not `force` it) and compares.
+#
+# Without this line the default would be `./bindings` resolved against the test
+# binary's working directory, i.e. a stray `src-tauri/crates/core/bindings/`.
+TS_RS_EXPORT_DIR = { value = "src/shared/bindings", relative = true }

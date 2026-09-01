@@ -1,2 +1,12 @@
-# Generated TypeScript types — do not edit (PRD §6.13, NFR-33). Emitted from
-# the Rust `models/` by ts-rs; the generator is wired up in SETUP-05.
+# Generated TypeScript types — do not edit (PRD §6.13, NFR-33). Emitted by
+# ts-rs from the Rust types carrying `#[ts(export)]`, and committed so the
+# frontend reads the contract without a Rust toolchain.
+#
+# Regenerate with `npm run bindings:generate`; `npm run bindings:check` (which
+# `pretypecheck` runs) fails if what is committed here is not what the Rust
+# types produce right now.
+#
+# Not `models/` yet, despite what this file said while the directory was empty:
+# `models/` holds no types at all so far, and the one file here comes from
+# `db::Migration` — see the comment above that struct for why the generator is
+# proven on it and why that is not the beginning of the Appendix D catalogue.

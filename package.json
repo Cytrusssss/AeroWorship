@@ -5,18 +5,43 @@
   "description": "Offline-first church presentation software for Windows.",
   "type": "module",
   "scripts": {
+    "preinstall": "node scripts/check-install-command.js",
     "dev": "vite",
     "build": "vite build",
-    "tauri": "tauri"
+    "postbuild": "node scripts/check-dist-html.js",
+    "tauri": "tauri",
+    "pretest": "node scripts/check-fixture-content.js",
+    "test": "vitest run",
+    "test:perf:shell": "cargo test --release --manifest-path src-tauri/Cargo.toml -p aeroworship --features tauri/custom-protocol",
+    "test:perf:core": "cargo build --release --manifest-path src-tauri/Cargo.toml -p aeroworship-core",
+    "commands:check": "node scripts/check-command-inventory.js",
+    "prelint": "npm run commands:check",
+    "lint": "eslint .",
+    "postlint": "prettier --check .",
+    "format": "prettier --write .",
+    "bindings:generate": "cargo test --workspace --manifest-path src-tauri/Cargo.toml export_bindings",
+    "bindings:check": "node scripts/check-bindings.js",
+    "pretypecheck": "npm run bindings:check",
+    "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.9.0",
+    "@tauri-apps/api": "^2.11.1",
     "vue": "^3.5.41"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@tauri-apps/cli": "^2.9.0",
+    "@types/node": "^26.2.0",
     "@vitejs/plugin-vue": "^6.0.8",
+    "eslint": "^10.8.1",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-vue": "^10.10.0",
+    "globals": "^17.9.0",
+    "prettier": "^3.9.6",
     "typescript": "^5.9.3",
-    "vite": "^8.2.1"
+    "typescript-eslint": "^8.66.0",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10",
+    "vue-tsc": "^3.3.9"
   }
 }

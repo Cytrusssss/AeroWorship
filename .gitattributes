@@ -1,0 +1,25 @@
+# Line endings are normalised to LF in the index *and* in the working tree.
+#
+# `text=auto` on its own is not enough. It only pins the index; the checkout is
+# left to core.autocrlf, which is `true` on a stock Git for Windows install and
+# therefore writes CRLF into the working tree. `.prettierrc.json` does not set
+# `endOfLine`, so Prettier's default of "lf" applies and `postlint`
+# (`prettier --check .`, which npm runs after every `npm run lint`) rejects
+# every CRLF file it is allowed to see. Measured on a checkout of this index:
+# 17 files failed, which is all of them. The gate stays green only for whoever
+# authored the files in place and never re-checked them out. `eol=lf` is the
+# part that pins the working tree and removes that per-machine variance.
+#
+# Setting Prettier's `endOfLine` to "auto" would also silence the failure and
+# was rejected: it makes the repository accept both spellings at once and moves
+# the ambiguity into diffs instead of eliminating it.
+* text=auto eol=lf
+
+# Binary assets. `text=auto` already classifies these correctly today (verified
+# with `git ls-files --eol`: i/-text w/-text), but that detection is a NUL-byte
+# heuristic over the head of the file. An icon that happened to dodge it would
+# be silently corrupted by LF normalisation, and silent corruption of a binary
+# is not something the test suite would catch. Naming the types makes the
+# guarantee depend on the extension rather than on the bytes.
+*.png binary
+*.ico binary

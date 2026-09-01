@@ -4,6 +4,13 @@
 # also keeps `target/` where `.gitignore` already expects it.
 [workspace]
 members = ["crates/core"]
+# Stated, not inferred. `edition = "2021"` already implies resolver 2, and the
+# reasoning in `[dev-dependencies]` below — that cargo unifies features across
+# dependency kinds for one package, so `default-features = false` has to appear
+# on BOTH `tauri` declarations — is written for resolver 2's rules. Spelling it
+# out means that argument no longer depends on a reader deriving the resolver
+# from the edition, and it does not silently change if the edition ever moves.
+resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
@@ -50,10 +57,42 @@ tauri = { version = "2", default-features = false, features = [
     "x11",
     "dbus",
 ] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# No `serde` and no `serde_json` here, on purpose. Both were declared before
+# anything used them and never were: `serde` does not appear anywhere in
+# `src-tauri/src/`, because the wire types live in `aeroworship-core`, which
+# derives `Serialize` itself (ADR-0008), and `#[tauri::command]` expands to
+# `::tauri::` paths rather than to `::serde::` ones. Neither leaves the
+# dependency graph — `tauri` pulls both in — so this is not an NFR-16 saving; it
+# is about precedent. A declared `serde_json` is an invitation to accept
+# `serde_json::Value` from the frontend, which is exactly the free-form,
+# unvalidated argument the rules in `src/commands/mod.rs` forbid. If the shell
+# crate ever needs either, declare it in the change that needs it, with the
+# type it is for.
+
+[dev-dependencies]
+# Test-only, and `default-features = false` on purpose — the same "defaults
+# minus `dynamic-acl`" list the normal dependency above spells out (ADR-0013).
+# Cargo unifies features across dependency kinds for one package, so a plain
+# `tauri = { version = "2", features = ["test"] }` here would switch the app's
+# default feature set back on for every `cargo test` and every
+# `cargo clippy --all-targets` build — `dynamic-acl` included. The one feature
+# added is `test`, which brings `tauri::test::{mock_builder, get_ipc_response,
+# MockRuntime}`; it is what lets `tests/acl_window_scoping.rs` invoke a command
+# from a named window with no GUI, and therefore what turns "the `output`
+# window is granted nothing" from a claim read off the manifests into an
+# assertion (SEC-01).
+tauri = { version = "2", default-features = false, features = ["test"] }
 
 [profile.release]
+# Cross-marker for the `custom-protocol` guard in `src/lib.rs` (ADR-0018,
+# auditor finding S9). That guard fires on `all(not(debug_assertions), dev)` —
+# it uses `debug_assertions` as its proxy for "this is a release profile".
+# The proxy is not the thing itself: setting `debug-assertions = true` below,
+# or passing `-C debug-assertions=on` through `RUSTFLAGS`, disarms the guard
+# silently and lets a release binary ship that loads its UI from
+# `http://localhost:1420`. The value is stated rather than left to the profile
+# default so that anyone flipping it sees this note in the same diff.
+debug-assertions = false
 # NFR-16 keeps the installer under 15 MB; the binary is the largest single
 # contributor, so the release profile optimises for size, not speed.
 opt-level = "s"
