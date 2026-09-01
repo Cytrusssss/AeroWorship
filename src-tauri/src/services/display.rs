@@ -49,9 +49,11 @@
 
 use aeroworship_core::models::{flag_primary, monitor_id, select_output_monitor, Monitor};
 use tauri::{
-    window::Color, AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewUrl,
-    WebviewWindowBuilder, WindowEvent,
+    webview::DownloadEvent, window::Color, AppHandle, Manager, PhysicalPosition, PhysicalSize,
+    Runtime, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
+
+use crate::services::webview_chrome;
 
 /// Label of the Control Panel window, as declared in `tauri.conf.json` and as
 /// scoped in `capabilities/main-window.json`.
@@ -263,8 +265,15 @@ fn open_output_window<R: Runtime>(app: &AppHandle<R>, target: &Monitor) -> tauri
     // without teaching `app_origins` about this label makes the guard refuse
     // this window's own pages (SEC-02).
     .background_color(OUTPUT_BACKGROUND)
-    // "Borderless" (FR-102). The rest of the chrome FR-105 asks about — context
-    // menu, text selection, dev-tools — is that item's, and is not touched here.
+    // "Borderless" (FR-102), which is also the whole of FR-105's "no chrome, no
+    // title bar": an undecorated window has neither. The rest of what FR-105
+    // asks for is split by where the lever is — the context menu and the
+    // browser accelerator keys are WebView2 settings with no builder to sit on
+    // and are handled after `build` by [`webview_chrome::harden`]; text
+    // selection and scrollbars are CSS and live in `src/output/Renderer.vue`;
+    // devtools need no code at all, because `wry` already defaults them off
+    // without `debug_assertions`. Each of those three is argued where it
+    // happens, not here.
     .decorations(false)
     // An undecorated window still keeps its resize border on Windows unless
     // this is off, so without it a stray drag at the edge of the projector
@@ -285,6 +294,43 @@ fn open_output_window<R: Runtime>(app: &AppHandle<R>, target: &Monitor) -> tauri
     // mapped at the OS's default position and then moved is a flash of the
     // wrong content on the wrong display.
     .visible(false)
+    // Nothing may be written to disk from this window (FR-105, carried here by
+    // the SEC-02 audit's fifth surface). Refusing every download is the whole
+    // policy: the projector displays, it does not save.
+    //
+    // **Why this is not already true.** `tauri` sets `download_handler: None`
+    // in both `WebviewBuilder` constructors (`webview/mod.rs:357`, `:436`) and
+    // never replaces it, unlike `navigation_handler`, which it replaces
+    // unconditionally (`manager/webview.rs:580`). With it `None`,
+    // `tauri-runtime-wry` skips both `with_download_*_handler` calls
+    // (`lib.rs:5010-5026`) and `wry`'s own default survives —
+    // `download_started_handler: Some(Box::new(|_, _| true))` (`wry`
+    // `lib.rs:830`), i.e. a handler that permits everything. So the
+    // `add_DownloadStarting` subscription *is* installed; what is missing is a
+    // policy. Returning `false` here reaches `args.SetCancel(true)` (`wry`
+    // `webview2/mod.rs:857-863`), which is also what keeps Edge's download
+    // bar off the congregation's screen.
+    //
+    // **This one fails closed, which is worth naming because its sibling does
+    // not.** `tauri`'s wrapper looks the webview up by label and returns
+    // `false` when the label is absent (`webview/mod.rs:743-758`) — refuse. The
+    // navigation wrapper answers `true` in the same situation, and that is
+    // residual 1 in `crate::services::navigation`.
+    //
+    // Only the scheme is printed. A `data:` URL *is* the slide text, so
+    // printing the URL would copy worship content into a log — the one thing
+    // NFR-34 forbids, and the same reason ADR-0053 decision 6 gives for the
+    // refusal line next door.
+    .on_download(|_webview, event| {
+        if let DownloadEvent::Requested { url, .. } = event {
+            eprintln!(
+                "FR-105: refused a download from the output window (a `{}:` URL). The rest \
+                 of the URL is deliberately omitted: it can carry the slide text.",
+                url.scheme()
+            );
+        }
+        false
+    })
     .build()?;
 
     // Bound here — after `build`, before any placement — rather than by the
@@ -310,6 +356,18 @@ fn open_output_window<R: Runtime>(app: &AppHandle<R>, target: &Monitor) -> tauri
     // part of the ADR-0040 sequence; the four calls after it are, and those may
     // not be reordered among themselves at all.
     close_output_with_control_panel(app);
+
+    // The two WebView2 settings `tauri` exposes no builder for: the default
+    // context menu, and — on release profiles only — the browser accelerator
+    // keys behind Ctrl-S and Ctrl-P (FR-105, ADR-0042 finding 2). Reached
+    // through `Webview::with_webview`, so it can only happen after `build`.
+    //
+    // Not part of the ADR-0040 placement sequence below, and it must not be
+    // read as joining it: it returns `()`, takes no early exit and touches no
+    // geometry, so it may sit anywhere between the binding above and `show()`.
+    // It sits here, before the window is ever mapped, so that the projector is
+    // never visible with WebView2's defaults still on it.
+    webview_chrome::harden(&window);
 
     // Physical pixels, applied verbatim. `Monitor` reports the OS's own
     // virtual-screen coordinates (never divided by `scale_factor`), and this is

@@ -69,6 +69,33 @@ tauri = { version = "2", default-features = false, features = [
 # crate ever needs either, declare it in the change that needs it, with the
 # type it is for.
 
+# Windows-only, and both are already in this binary: `tauri`'s `wry` feature
+# pulls `webview2-com` in on Windows (`tauri` `Cargo.toml:408`), which pulls
+# `windows-core` in through `webview2-com-sys`. Declaring them here therefore
+# adds **zero bytes** to the installer (NFR-16) — no new crate is compiled and
+# no new interface is generated; `ICoreWebView2Settings3` is already emitted
+# because `wry` itself uses it (`wry` `webview2/mod.rs:583`).
+#
+# What they buy is the only lever that exists for ADR-0042 finding 2.
+# `tauri` exposes no wrapper for `wry`'s `with_default_context_menus` or
+# `with_browser_accelerator_keys` — `tauri-runtime-wry` never calls either — so
+# the WebView2 settings object has to be reached through the handle `tauri` does
+# expose, `Webview::with_webview` → `PlatformWebview::controller()`. See
+# `src/services/webview_chrome.rs` for why that is preferred over doing it in
+# JavaScript inside the document.
+#
+# The versions are the ones `tauri` 2.11.5 already resolves (`webview2-com`
+# 0.38.2, `windows-core` 0.61.2 — `webview2-com-sys` `Cargo.toml:58`). They are
+# not free-floating: `PlatformWebview::controller()` returns
+# `webview2_com::…::ICoreWebView2Controller`, so if `tauri` ever moves to a
+# different major of `webview2-com` and this file does not, the two types stop
+# being the same type and the build fails to compile. That is the loud
+# direction, and it is the reason no lower bound is pinned harder than the
+# caret: a silent mismatch is not reachable.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows-core = "0.61"
+
 [dev-dependencies]
 # Test-only, and `default-features = false` on purpose — the same "defaults
 # minus `dynamic-acl`" list the normal dependency above spells out (ADR-0013).
