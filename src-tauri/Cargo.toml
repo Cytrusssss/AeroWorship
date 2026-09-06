@@ -1,15 +1,5 @@
-# Workspace root. `src-tauri/` stays the root (rather than the repository root)
-# because `tauri-cli`, `tauri-build` and `tauri.conf.json` resolution all assume
-# the app package lives at `src-tauri/Cargo.toml`; keeping the workspace here
-# also keeps `target/` where `.gitignore` already expects it.
 [workspace]
 members = ["crates/core"]
-# Stated, not inferred. `edition = "2021"` already implies resolver 2, and the
-# reasoning in `[dev-dependencies]` below — that cargo unifies features across
-# dependency kinds for one package, so `default-features = false` has to appear
-# on BOTH `tauri` declarations — is written for resolver 2's rules. Spelling it
-# out means that argument no longer depends on a reader deriving the resolver
-# from the edition, and it does not silently change if the edition ever moves.
 resolver = "2"
 
 [workspace.package]
@@ -18,9 +8,6 @@ edition = "2021"
 rust-version = "1.77.2"
 publish = false
 
-# The Tauri shell package. It owns the window, the event bus and the IPC
-# surface; every piece of domain logic belongs to `aeroworship-core`, which
-# cannot depend on `tauri` (ADR-0008).
 [package]
 name = "aeroworship"
 description = "Offline-first church presentation software for Windows."
@@ -34,98 +21,24 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 aeroworship-core = { path = "crates/core" }
-# This is the `tauri` 2.11.5 default feature set minus `dynamic-acl`, spelled
-# out on purpose — do not "tidy" it back to defaults (ADR-0013). `dynamic-acl`
-# enables `Manager::add_capability()`, which parses a capability from any
-# `AsRef<str>` at runtime; a permission could then be granted without ever
-# appearing in `capabilities/*.json` or `gen/schemas/capabilities.json`, which
-# defeats the NFR-14 verification method ("Capability manifest reviewed at each
-# release"). `compression` must stay: dropping it grows the binary (GATE-G5).
-# `x11`/`dbus` are Linux-only no-ops here but are kept so the list stays a
-# faithful "defaults minus one".
-#
-# Note this does not remove `reqwest`/`hyper`/`tower`, which were evaluated for
-# NFR-16: `tauri` declares them under
-# `cfg(any(target_os = "android", all(target_vendor = "apple", not(target_os = "macos"))))`,
-# so they are locked in `Cargo.lock` (which is target-agnostic) but never
-# compiled or linked on Windows. GATE-G6 therefore has to be proven at runtime,
-# not from the lockfile.
 tauri = { version = "2", default-features = false, features = [
-    "wry",
-    "compression",
-    "common-controls-v6",
-    "x11",
-    "dbus",
+  "wry",
+  "compression",
+  "common-controls-v6",
+  "x11",
+  "dbus",
 ] }
-# No `serde` and no `serde_json` here, on purpose. Both were declared before
-# anything used them and never were: `serde` does not appear anywhere in
-# `src-tauri/src/`, because the wire types live in `aeroworship-core`, which
-# derives `Serialize` itself (ADR-0008), and `#[tauri::command]` expands to
-# `::tauri::` paths rather than to `::serde::` ones. Neither leaves the
-# dependency graph — `tauri` pulls both in — so this is not an NFR-16 saving; it
-# is about precedent. A declared `serde_json` is an invitation to accept
-# `serde_json::Value` from the frontend, which is exactly the free-form,
-# unvalidated argument the rules in `src/commands/mod.rs` forbid. If the shell
-# crate ever needs either, declare it in the change that needs it, with the
-# type it is for.
-
-# Windows-only, and both are already in this binary: `tauri`'s `wry` feature
-# pulls `webview2-com` in on Windows (`tauri` `Cargo.toml:408`), which pulls
-# `windows-core` in through `webview2-com-sys`. Declaring them here therefore
-# adds **zero bytes** to the installer (NFR-16) — no new crate is compiled and
-# no new interface is generated; `ICoreWebView2Settings3` is already emitted
-# because `wry` itself uses it (`wry` `webview2/mod.rs:583`).
-#
-# What they buy is the only lever that exists for ADR-0042 finding 2.
-# `tauri` exposes no wrapper for `wry`'s `with_default_context_menus` or
-# `with_browser_accelerator_keys` — `tauri-runtime-wry` never calls either — so
-# the WebView2 settings object has to be reached through the handle `tauri` does
-# expose, `Webview::with_webview` → `PlatformWebview::controller()`. See
-# `src/services/webview_chrome.rs` for why that is preferred over doing it in
-# JavaScript inside the document.
-#
-# The versions are the ones `tauri` 2.11.5 already resolves (`webview2-com`
-# 0.38.2, `windows-core` 0.61.2 — `webview2-com-sys` `Cargo.toml:58`). They are
-# not free-floating: `PlatformWebview::controller()` returns
-# `webview2_com::…::ICoreWebView2Controller`, so if `tauri` ever moves to a
-# different major of `webview2-com` and this file does not, the two types stop
-# being the same type and the build fails to compile. That is the loud
-# direction, and it is the reason no lower bound is pinned harder than the
-# caret: a silent mismatch is not reachable.
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
 windows-core = "0.61"
 
 [dev-dependencies]
-# Test-only, and `default-features = false` on purpose — the same "defaults
-# minus `dynamic-acl`" list the normal dependency above spells out (ADR-0013).
-# Cargo unifies features across dependency kinds for one package, so a plain
-# `tauri = { version = "2", features = ["test"] }` here would switch the app's
-# default feature set back on for every `cargo test` and every
-# `cargo clippy --all-targets` build — `dynamic-acl` included. The one feature
-# added is `test`, which brings `tauri::test::{mock_builder, get_ipc_response,
-# MockRuntime}`; it is what lets `tests/acl_window_scoping.rs` invoke a command
-# from a named window with no GUI, and therefore what turns "the `output`
-# window is granted nothing" from a claim read off the manifests into an
-# assertion (SEC-01).
 tauri = { version = "2", default-features = false, features = ["test"] }
 
 [profile.release]
-# Cross-marker for the `custom-protocol` guard in `src/lib.rs` (ADR-0018,
-# auditor finding S9). That guard fires on `all(not(debug_assertions), dev)` —
-# it uses `debug_assertions` as its proxy for "this is a release profile".
-# The proxy is not the thing itself: setting `debug-assertions = true` below,
-# or passing `-C debug-assertions=on` through `RUSTFLAGS`, disarms the guard
-# silently and lets a release binary ship that loads its UI from
-# `http://localhost:1420`. The value is stated rather than left to the profile
-# default so that anyone flipping it sees this note in the same diff.
 debug-assertions = false
-# NFR-16 keeps the installer under 15 MB; the binary is the largest single
-# contributor, so the release profile optimises for size, not speed.
 opt-level = "s"
 lto = true
 codegen-units = 1
-# `unwind`, not `abort`: a panic inside the output window must not take the
-# Control Panel down mid-service (NFR-08 / GATE-G7) — ADR-0009.
 panic = "unwind"
 strip = true

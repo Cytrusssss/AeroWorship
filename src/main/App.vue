@@ -1,16 +1,4 @@
 <script setup lang="ts">
-// Placeholder shell for the Control Panel. The real surface — Library, Session,
-// Builder and Settings — arrives with the FR-2xx items and lives under `views/`.
-//
-// The literal below is deliberately unique to this bundle: `dist/` is grepped
-// for it to prove the output entry does not pull Control Panel code in.
-//
-// The one thing on it that is not scaffolding is the display list: FR-101 says
-// displays are enumerated at start-up by the Rust backend, and this renders the
-// answer so the enumeration can be checked against Windows Display Settings
-// without opening dev tools — which release builds do not have anyway (FR-105).
-// It is a verification surface, not the FR-103 picker; that one is its own item
-// and belongs in a settings view.
 import { invoke } from '@tauri-apps/api/core'
 import { onMounted, ref } from 'vue'
 
@@ -19,9 +7,6 @@ import type { Monitor } from '../shared/bindings/Monitor'
 const bundleName = 'AeroWorship Control Panel'
 
 const monitors = ref<Monitor[]>([])
-// Three states, not two: `null` while the command is in flight, so an empty
-// list reads as "the backend reported no displays" rather than as "not asked
-// yet". They are different bugs and they would look identical.
 const failure = ref<string | null>(null)
 const loaded = ref(false)
 
@@ -79,8 +64,6 @@ onMounted(async () => {
 </template>
 
 <style>
-/* Unscoped on purpose: removes the default body margin so the dark shell
-   reaches the window edges. */
 html,
 body {
   margin: 0;
@@ -89,11 +72,6 @@ body {
 </style>
 
 <style scoped>
-/* Dark by default (NFR-27): the Control Panel is used in a darkened booth.
-
-   `min-height: 100vh` next to `padding` only fits the viewport because of the
-   global `box-sizing: border-box` in `src/shared/styles/base.css`; without it
-   this pair is 100vh + 4rem tall and the window scrolls. */
 .control-panel {
   background: #16181d;
   color: #e6e8ec;
@@ -124,8 +102,6 @@ th {
   font-weight: 600;
 }
 
-/* The id is opaque and can be long; it is shown because this table exists to be
-   compared against the OS, not because a user should ever need to read it. */
 .id {
   color: #9aa1ad;
   font-family: ui-monospace, monospace;

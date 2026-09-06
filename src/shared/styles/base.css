@@ -1,22 +1,3 @@
-/* Box model for both bundles. Imported by `src/main/main.ts` and
-   `src/output/output.ts`; nothing else belongs in here.
-
-   This exists because of a defect, not a preference. The first runtime
-   verification of SETUP-07 opened the Control Panel and found a vertical
-   scrollbar on a window holding two lines of text: `.control-panel` combines
-   `min-height: 100vh` with `padding: 2rem`, and under the CSS default
-   `content-box` that padding is laid *outside* the declared height, making the
-   document 100vh + 4rem tall. Under `border-box` the padding is drawn inside
-   it, and the same declaration fits the viewport. Delete this rule and that
-   scrollbar comes back.
-
-   One file rather than a copy in each bundle's `<style>` block: the two copies
-   would be free to drift into different box models and no gate in this repo
-   would go red for it. The cost to the projector bundle — the 28 MB Projector
-   Output line in the PRD §5.1 budget — was measured, not assumed. Because both
-   entry points import it, Vite emits it once as a shared CSS chunk that both
-   documents link: 40 bytes of minified CSS plus the 96-byte `<link>` in
-   `output.html`. `dist/assets/output-*.css` itself is unchanged at 288 bytes. */
 *,
 *::before,
 *::after {

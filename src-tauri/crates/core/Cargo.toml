@@ -1,6 +1,3 @@
-# Domain crate. It must never gain a dependency on `tauri`, `wry`, `tao` or any
-# other windowing/webview crate — that constraint is the whole point of the
-# split (ADR-0008) and it is what keeps `cargo test -p aeroworship-core` fast.
 [package]
 name = "aeroworship-core"
 description = "Domain logic for AeroWorship: models, storage, parsing, serialisation."
@@ -10,75 +7,11 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-# `bundled` compiles SQLite into the binary, so there is no system library to
-# detect and nothing for a church PC to be missing (PRD §6.12).
-#
-# FTS5 needs no feature flag of its own here, and that is worth stating because
-# the opposite is widely assumed: `rusqlite` 0.40 has no `fts5` feature at all
-# (asking for one is a resolver error), and `libsqlite3-sys`'s bundled amalgamation
-# is compiled with `-DSQLITE_ENABLE_FTS5`. Appendix A's `songs_fts` and
-# `verses_fts` are therefore available — but *because a flag is not involved*,
-# nothing here would fail to compile if that ever changed. It would fail when
-# `CREATE VIRTUAL TABLE … USING fts5` runs. Migration 001 executes exactly that,
-# so a broken build cannot get past `migrate()`.
-#
-# Default features are off on purpose: they pull in `cache` (and with it
-# `hashlink` — confirmed absent from Cargo.lock with the flag off). The other
-# default feature, `ffi-sqlite-wasm-rs`, is not weight saved on this target:
-# `rusqlite`'s own Cargo.toml gates its `sqlite-wasm-rs` dependency behind
-# `cfg(target_family = "wasm")`, so it is never pulled in on native
-# Windows/Linux/macOS builds regardless of this flag. `default-features =
-# false` is kept anyway for the `cache` saving, which is real; only the wasm
-# half of the old justification is dropped.
-# Statement caching is worth revisiting when FR-2xx measures its query paths;
-# until then it is weight in a 15 MB installer budget (NFR-16).
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
-# The wire types in `models/` are serialised across the IPC boundary, so they
-# have to derive `Serialize` here rather than being mirrored by a second set of
-# structs in the shell crate. This costs nothing against NFR-16: `tauri` already
-# depends on `serde` with `derive`, so the crates are in the graph and the
-# installer either way — the only new thing is that this crate names them too.
+rusqlite = { version = "0.40", default-features = false, features = [
+  "bundled",
+] }
 serde = { version = "1", features = ["derive"] }
-# FR-401 needs a JSON *reader*, not just a derive: `parse_template` is handed
-# the text of an `.aerotpl` file and has to refuse it before anything renders
-# (NFR-28), so `serde_json::from_str` is the function the item is built around.
-#
-# Against NFR-16 this is the same argument `serde` makes above, and it is
-# measured rather than assumed: `serde_json` 1.0.151 is already in `Cargo.lock`
-# and already in the installer, because `tauri` depends on it for the IPC
-# boundary. Naming it here adds no crate to the graph; it only makes this crate
-# say out loud what it uses.
-#
-# Note the shell crate still refuses it, and that is not an inconsistency — see
-# the comment in `src-tauri/Cargo.toml`. A declared `serde_json` *there* invites
-# a command taking `serde_json::Value` from the frontend. Here it is the tool
-# for reading a document this crate then validates field by field, which is the
-# opposite of accepting free-form JSON.
 serde_json = "1"
 
 [dev-dependencies]
-# The Rust→TypeScript generator behind NFR-33.
-#
-# A **dev**-dependency, not a normal one, and that is the whole reason this
-# arrangement is affordable: `ts-rs` drags in `thiserror` plus the usual
-# `syn`/`quote`/`proc-macro2` macro stack, and this crate deliberately refused
-# `thiserror` for four `Display` impls to protect the 15 MB installer budget
-# (see `db/error.rs`). Taking it as a dev-dependency means the derive is
-# compiled only into the `cfg(test)` build of this lib — `#[cfg_attr(test,
-# derive(ts_rs::TS))]` — so not one byte of it reaches the shipped binary.
-# `cargo build` never links it, and neither does a plain `cargo clippy`;
-# `cargo clippy --all-targets` does compile it, because that lints the test
-# targets and the test build is exactly where the derive lives. That costs
-# lint time, never installer bytes. It does appear in `Cargo.lock`; that is
-# bookkeeping, not weight.
-#
-# `serde-compat` (a default feature) is kept on purpose, and as of FR-101 that
-# is measured rather than predicted. `models::Monitor` carries
-# `#[serde(rename_all = "camelCase")]` because Appendix D says the wire shape is
-# camelCase. Regenerating with `default-features = false` was tried: the build
-# stays green, one file is still produced, and it declares `scale_factor` and
-# `is_primary` — snake_case field names for a type that goes over IPC as
-# `scaleFactor` and `isPrimary`. Nothing fails; `vue-tsc` would simply typecheck
-# the frontend against a contract the backend does not speak. The failure mode
-# is silent, so the feature stays.
 ts-rs = "12"
